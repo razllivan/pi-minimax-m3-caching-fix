@@ -48,7 +48,7 @@
  * extension and switch back to the built-in `minimax / MiniMax-M3`.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ProviderConfig, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, TextContent, ThinkingContent } from "@earendil-works/pi-ai";
 
 /** Provider names this extension owns. */
@@ -70,26 +70,30 @@ const OWN_PROVIDERS = new Set(["minimax-m3-cache-fixed", "minimax-cn-m3-cache-fi
 const M3_COST = { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 };
 const M3_LIMITS = { contextWindow: 1_000_000, maxTokens: 512_000 };
 
-interface ProviderModel {
-	id: string;
-	name: string;
-	api: "openai-completions";
-	reasoning: boolean;
-	input: ("text" | "image")[];
-	cost: typeof M3_COST;
-	contextWindow: number;
-	maxTokens: number;
-	compat: {
-		supportsStore: false;
-		supportsDeveloperRole: false;
-		supportsReasoningEffort: false;
-		maxTokensField: "max_tokens";
-		supportsStrictMode: false;
-		supportsLongCacheRetention: false;
-	};
-}
+/**
+ * Compat flags for OpenAI-completions against MiniMax-M3.
+ *
+ * Modeled after the `OpenAICompletionsCompat` shape in pi-ai but written as
+ * a local constant because `ProviderModelConfig["compat"]` is typed
+ * `Model<Api>["compat"]` — a union over every API — and pi-ai@0.79.1's union
+ * member for `openai-completions` (`ResolvedOpenAICompletionsCompat`) is the
+ * post-resolution shape, not the author-facing input. The author-facing
+ * shape accepts partial input; the keys below are exactly what the upstream
+ * M3 entry uses. Extra unknown keys are rejected by the validator in
+ * `ModelRegistry.validateProviderConfig`; missing keys are filled in by
+ * `applyProviderConfig`'s defaults. We only need to list the ones that
+ * differ from the defaults.
+ */
+const M3_COMPAT = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: false,
+	maxTokensField: "max_tokens" as const,
+	supportsStrictMode: false,
+	supportsLongCacheRetention: false,
+};
 
-function makeM3Model(suffix: string): ProviderModel {
+function makeM3Model(suffix: string): ProviderModelConfig {
 	return {
 		id: "MiniMax-M3",
 		name: `MiniMax-M3 (cache-fixed${suffix})`,
@@ -99,14 +103,20 @@ function makeM3Model(suffix: string): ProviderModel {
 		cost: M3_COST,
 		contextWindow: M3_LIMITS.contextWindow,
 		maxTokens: M3_LIMITS.maxTokens,
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			maxTokensField: "max_tokens",
-			supportsStrictMode: false,
-			supportsLongCacheRetention: false,
-		},
+		compat: M3_COMPAT,
+	};
+}
+
+function makeProviderConfig(
+	baseUrl: string,
+	apiKey: string,
+	suffix: string,
+): ProviderConfig {
+	return {
+		baseUrl,
+		apiKey,
+		api: "openai-completions",
+		models: [makeM3Model(suffix)],
 	};
 }
 
@@ -149,19 +159,15 @@ function isThinkingBlock(block: unknown): block is ThinkingContent {
 export default function (pi: ExtensionAPI) {
 	// --- Provider registration (T2: passive-cache routing) -----------------
 
-	pi.registerProvider("minimax-m3-cache-fixed", {
-		baseUrl: "https://api.minimax.io/v1",
-		apiKey: "$MINIMAX_API_KEY",
-		api: "openai-completions",
-		models: [makeM3Model("")],
-	});
+	pi.registerProvider(
+		"minimax-m3-cache-fixed",
+		makeProviderConfig("https://api.minimax.io/v1", "$MINIMAX_API_KEY", ""),
+	);
 
-	pi.registerProvider("minimax-cn-m3-cache-fixed", {
-		baseUrl: "https://api.minimaxi.com/v1",
-		apiKey: "$MINIMAX_CN_API_KEY",
-		api: "openai-completions",
-		models: [makeM3Model(" — CN")],
-	});
+	pi.registerProvider(
+		"minimax-cn-m3-cache-fixed",
+		makeProviderConfig("https://api.minimaxi.com/v1", "$MINIMAX_CN_API_KEY", " — CN"),
+	);
 
 	// --- Thinking-strip hook -----------------------------------------------
 
