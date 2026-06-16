@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Tunable `contextWindow` via `m3-clean-overrides.json`.** The extension
+  reads `<agent-dir>/m3-clean-overrides.json` on startup and applies the
+  `contextWindow` value to the registered `MiniMax-M3` model. The agent
+  directory is discovered dynamically by importing `getAgentDir()` from
+  the active Pi fork (`@earendil-works/pi-coding-agent`,
+  `@oh-my-pi/pi-coding-agent`, or `@gsd/pi-coding-agent`), with a silent
+  fallback to built-in defaults when none is installed. Other model
+  fields (`cost`, `compat`, `headers`, `name`, etc.) remain at their
+  built-in values; full overrides continue to go through `models.json`.
+  Invalid `contextWindow` values (non-positive or non-numeric) are
+  reported via a TUI notification at `session_start` and the field falls
+  back to the default.
+
 ## [0.2.0] - 2026-06-12
 
 ### Changed

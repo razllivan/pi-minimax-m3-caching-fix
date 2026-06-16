@@ -43,6 +43,8 @@
  * to the built-in `minimax / MiniMax-M3` via /model.
  */
 
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type {
 	Api,
 	AssistantMessage,
@@ -53,7 +55,10 @@ import type {
 	TextContent,
 	ThinkingContent,
 } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream, getApiProvider } from "@earendil-works/pi-ai";
+import {
+	createAssistantMessageEventStream,
+	getApiProvider,
+} from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const OPEN_TAG = "<think>";
@@ -134,7 +139,9 @@ interface ThinkingSegment {
  * `<think>` content never reaches a visible text block and duplicated /
  * re-streamed reasoning collapses into a single thinking block.
  */
-function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventStream {
+function cleanStream(
+	base: AssistantMessageEventStream,
+): AssistantMessageEventStream {
 	const out = createAssistantMessageEventStream();
 
 	void (async () => {
@@ -170,9 +177,18 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 			if (segment?.open) return segment;
 			const block: ThinkingContent = { type: "thinking", thinking: "" };
 			output!.content.push(block);
-			segment = { block, index: output!.content.length - 1, open: true, text: "" };
+			segment = {
+				block,
+				index: output!.content.length - 1,
+				open: true,
+				text: "",
+			};
 			baseThinkingAccs.clear();
-			out.push({ type: "thinking_start", contentIndex: segment.index, partial: output! });
+			out.push({
+				type: "thinking_start",
+				contentIndex: segment.index,
+				partial: output!,
+			});
 			return segment;
 		};
 
@@ -182,8 +198,9 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 			segment.text = segment.text.trimEnd();
 			segment.block.thinking = segment.text;
 			if (segment.signature) {
-				(segment.block as ThinkingContent & { thinkingSignature?: string }).thinkingSignature =
-					segment.signature;
+				(
+					segment.block as ThinkingContent & { thinkingSignature?: string }
+				).thinkingSignature = segment.signature;
 			}
 			out.push({
 				type: "thinking_end",
@@ -203,7 +220,12 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 			}
 			seg.text += delta;
 			seg.block.thinking = seg.text;
-			out.push({ type: "thinking_delta", contentIndex: seg.index, delta, partial: output });
+			out.push({
+				type: "thinking_delta",
+				contentIndex: seg.index,
+				delta,
+				partial: output,
+			});
 		};
 
 		/**
@@ -245,10 +267,19 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 				output.content.push(state.block);
 				state.index = output.content.length - 1;
 				state.started = true;
-				out.push({ type: "text_start", contentIndex: state.index, partial: output });
+				out.push({
+					type: "text_start",
+					contentIndex: state.index,
+					partial: output,
+				});
 			}
 			state.block.text += text;
-			out.push({ type: "text_delta", contentIndex: state.index, delta: text, partial: output });
+			out.push({
+				type: "text_delta",
+				contentIndex: state.index,
+				delta: text,
+				partial: output,
+			});
 		};
 
 		try {
@@ -278,7 +309,11 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 						const baseBlock = ev.partial.content[ev.contentIndex] as
 							| (ThinkingContent & { thinkingSignature?: string })
 							| undefined;
-						if (segment && baseBlock?.type === "thinking" && baseBlock.thinkingSignature) {
+						if (
+							segment &&
+							baseBlock?.type === "thinking" &&
+							baseBlock.thinkingSignature
+						) {
 							segment.signature = baseBlock.thinkingSignature;
 						}
 						break;
@@ -326,7 +361,9 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 						syncMeta(ev.partial);
 						closeSegment();
 						const baseBlock = ev.partial.content[ev.contentIndex];
-						output!.content.push(baseBlock as AssistantMessage["content"][number]);
+						output!.content.push(
+							baseBlock as AssistantMessage["content"][number],
+						);
 						toolIndexMap.set(ev.contentIndex, output!.content.length - 1);
 						out.push({
 							type: "toolcall_start",
@@ -339,7 +376,12 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 						syncMeta(ev.partial);
 						const idx = toolIndexMap.get(ev.contentIndex);
 						if (idx === undefined) break;
-						out.push({ type: "toolcall_delta", contentIndex: idx, delta: ev.delta, partial: output! });
+						out.push({
+							type: "toolcall_delta",
+							contentIndex: idx,
+							delta: ev.delta,
+							partial: output!,
+						});
 						break;
 					}
 					case "toolcall_end": {
@@ -347,7 +389,12 @@ function cleanStream(base: AssistantMessageEventStream): AssistantMessageEventSt
 						const idx = toolIndexMap.get(ev.contentIndex);
 						if (idx === undefined) break;
 						output!.content[idx] = ev.toolCall;
-						out.push({ type: "toolcall_end", contentIndex: idx, toolCall: ev.toolCall, partial: output! });
+						out.push({
+							type: "toolcall_end",
+							contentIndex: idx,
+							toolCall: ev.toolCall,
+							partial: output!,
+						});
 						break;
 					}
 					case "done": {
@@ -400,34 +447,194 @@ const M3_COMPAT = {
 	maxTokensField: "max_tokens" as const,
 };
 
-function makeProvider(pi: ExtensionAPI, name: string, baseUrl: string, apiKey: string, label: string) {
-	const api = name as Api; // custom api id so only these models hit our handler
-	pi.registerProvider(name, {
-		baseUrl,
-		apiKey,
+/** Built-in defaults. Used when `m3-clean-overrides.json` is missing or a
+ *  field is not present in it. */
+const M3_DEFAULTS = {
+	contextWindow: 1_000_000,
+	maxTokens: 512_000,
+	cost: { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
+} as const;
+
+const OVERRIDES_FILE = "m3-clean-overrides.json";
+
+/** Per-model entry in `m3-clean-overrides.json`. Only `contextWindow` is
+ *  honored — full model replacement (cost, compat, etc.) is what
+ *  `~/.pi/agent/models.json` is for. */
+interface ModelOverride {
+	contextWindow?: number;
+}
+
+type OverridesFile = Record<string, Record<string, ModelOverride>>;
+
+/**
+ * Packages known to expose `getAgentDir()`. The first one whose import
+ * succeeds wins. Add new Pi forks here. If none is installed, we silently
+ * skip the override file and use built-in defaults.
+ */
+const AGENT_DIR_PROVIDERS = [
+	"@earendil-works/pi-coding-agent", // vanilla pi
+	"@oh-my-pi/pi-coding-agent", // omp (can1357/oh-my-pi)
+	"@gsd/pi-coding-agent", // gsd (open-gsd/gsd-pi)
+] as const;
+
+async function resolveAgentDir(): Promise<string | undefined> {
+	for (const pkg of AGENT_DIR_PROVIDERS) {
+		try {
+			const mod = await import(pkg);
+			if (typeof mod.getAgentDir === "function") return mod.getAgentDir();
+		} catch {
+			// Package not installed in this runtime — try the next one.
+		}
+	}
+	return undefined;
+}
+
+interface InvalidEntry {
+	provider: string;
+	modelId: string;
+	field: string;
+	reason: string;
+}
+
+interface LoadedOverrides {
+	contextWindow: number;
+	invalid: InvalidEntry[];
+}
+
+/** Read the override file and return the merged `contextWindow` plus a list
+ *  of validation errors to surface via TUI at `session_start`. */
+async function loadOverrides(agentDir: string): Promise<LoadedOverrides> {
+	const result: LoadedOverrides = {
+		contextWindow: M3_DEFAULTS.contextWindow,
+		invalid: [],
+	};
+	let parsed: OverridesFile;
+	try {
+		const text = await readFile(join(agentDir, OVERRIDES_FILE), "utf8");
+		parsed = JSON.parse(text);
+	} catch {
+		// File missing, unreadable, or invalid JSON — silent fallback to defaults.
+		return result;
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return result;
+	}
+	// Both providers share the same model id and the same context-window
+	// limit (M3 is one model). We honor only the first valid value across
+	// the file; mixing different `contextWindow` per provider would be
+	// surprising. If the user really needs split, they can override per
+	// provider in their own `models.json` (full model replacement).
+	let chosen: number | undefined;
+	for (const [provider, models] of Object.entries(parsed)) {
+		if (!models || typeof models !== "object") continue;
+		for (const [modelId, override] of Object.entries(models)) {
+			if (!override || typeof override !== "object") continue;
+			if (override.contextWindow === undefined) continue;
+			if (
+				typeof override.contextWindow !== "number" ||
+				!Number.isFinite(override.contextWindow) ||
+				override.contextWindow <= 0
+			) {
+				result.invalid.push({
+					provider,
+					modelId,
+					field: "contextWindow",
+					reason: `expected positive number, got ${JSON.stringify(override.contextWindow)}`,
+				});
+				continue;
+			}
+			if (chosen === undefined) chosen = override.contextWindow;
+		}
+	}
+	if (chosen !== undefined) result.contextWindow = chosen;
+	return result;
+}
+
+interface ProviderSpec {
+	name: string;
+	baseUrl: string;
+	apiKey: string;
+	label: string;
+}
+
+const PROVIDERS: readonly ProviderSpec[] = [
+	{
+		name: "minimax-m3-clean",
+		baseUrl: "https://api.minimax.io/v1",
+		apiKey: "$MINIMAX_API_KEY",
+		label: "MiniMax-M3 (clean)",
+	},
+	{
+		name: "minimax-cn-m3-clean",
+		baseUrl: "https://api.minimaxi.com/v1",
+		apiKey: "$MINIMAX_CN_API_KEY",
+		label: "MiniMax-M3 (clean — CN)",
+	},
+];
+
+function makeProvider(
+	pi: ExtensionAPI,
+	spec: ProviderSpec,
+	contextWindow: number,
+) {
+	const api = spec.name as Api; // custom api id so only these models hit our handler
+	pi.registerProvider(spec.name, {
+		baseUrl: spec.baseUrl,
+		apiKey: spec.apiKey,
 		api,
-		streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
+		streamSimple: (
+			model: Model<Api>,
+			context: Context,
+			options?: SimpleStreamOptions,
+		) => {
 			const driver = getApiProvider("openai-completions");
-			if (!driver) throw new Error("openai-completions api provider not registered");
-			const base = driver.streamSimple({ ...model, api: "openai-completions" }, context, options);
+			if (!driver)
+				throw new Error("openai-completions api provider not registered");
+			const base = driver.streamSimple(
+				{ ...model, api: "openai-completions" },
+				context,
+				options,
+			);
 			return cleanStream(base);
 		},
 		models: [
 			{
 				id: "MiniMax-M3",
-				name: label,
+				name: spec.label,
 				reasoning: true,
 				input: ["text", "image"],
-				cost: { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
-				contextWindow: 1_000_000,
-				maxTokens: 512_000,
+				cost: { ...M3_DEFAULTS.cost },
+				contextWindow,
+				maxTokens: M3_DEFAULTS.maxTokens,
 				compat: M3_COMPAT,
 			},
 		],
 	});
 }
 
-export default function (pi: ExtensionAPI) {
-	makeProvider(pi, "minimax-m3-clean", "https://api.minimax.io/v1", "$MINIMAX_API_KEY", "MiniMax-M3 (clean)");
-	makeProvider(pi, "minimax-cn-m3-clean", "https://api.minimaxi.com/v1", "$MINIMAX_CN_API_KEY", "MiniMax-M3 (clean — CN)");
+export default async function (pi: ExtensionAPI) {
+	const agentDir = await resolveAgentDir();
+	const overrides = agentDir
+		? await loadOverrides(agentDir)
+		: { contextWindow: M3_DEFAULTS.contextWindow, invalid: [] };
+
+	for (const spec of PROVIDERS) makeProvider(pi, spec, overrides.contextWindow);
+
+	// Surface validation errors via TUI. A missing file is silent — only
+	// malformed entries get notified. `ctx` is not available in the factory,
+	// so defer to `session_start`.
+	if (overrides.invalid.length > 0) {
+		const invalid = overrides.invalid;
+		pi.on("session_start", ((
+			_event: unknown,
+			ctx: { ui: { notify: (msg: string, kind: string) => void } },
+		) => {
+			for (const err of invalid) {
+				ctx.ui.notify(
+					`m3-clean-overrides: ${err.provider}/${err.modelId}.${err.field} — ${err.reason}. Falling back to default.`,
+					"error",
+				);
+			}
+		}) as Parameters<typeof pi.on>[1]);
+	}
 }

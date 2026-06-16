@@ -105,6 +105,48 @@ cache reads. For example, a 3-turn session looks like:
 | 2    | 128   | 8946      | 99%      |
 | 3    | 128   | 8946      | 99%      |
 
+## Tuning context window
+
+The built-in model advertises M3's full 1M-token context. To lower it (for
+example, to cap token spend on long sessions, or to fit a UI that expects a
+specific window), create `m3-clean-overrides.json` in the active agent
+config directory:
+
+| Pi fork        | Path                                                     |
+| -------------- | -------------------------------------------------------- |
+| vanilla pi     | `~/.pi/agent/m3-clean-overrides.json`                    |
+| omp            | `~/.omp/agent/m3-clean-overrides.json`                   |
+| gsd            | `~/.gsd/agent/m3-clean-overrides.json`                   |
+
+The file is detected automatically — no env vars to set. Schema:
+
+```json
+{
+  "minimax-m3-clean": {
+    "MiniMax-M3": { "contextWindow": 131072 }
+  },
+  "minimax-cn-m3-clean": {
+    "MiniMax-M3": { "contextWindow": 32768 }
+  }
+}
+```
+
+Notes:
+
+- Only `contextWindow` is honored. For full model replacement (cost,
+  `compat`, `headers`, etc.), use `models.json` instead.
+- Both providers share the same M3 model, so the first valid
+  `contextWindow` in the file wins. Splitting per provider is
+  intentionally unsupported here — keep the values consistent.
+- `contextWindow` must be a positive number. Non-positive or non-numeric
+  values are ignored and reported via a TUI notification at session
+  start; the field falls back to the built-in default (1M).
+- The file is read once when pi starts (or on `/reload`). Editing the
+  file does not hot-reload the running session — restart pi or run
+  `/reload` to apply.
+- When the file is missing, the extension silently uses the built-in
+  defaults. No TUI notification.
+
 ## Why a separate provider (not overriding the built-in)
 
 `pi.registerProvider(name, { models })` **replaces** every model registered
@@ -197,4 +239,3 @@ npm run check    # tsc --noEmit using the bundled tsconfig.json
 The `tsconfig.json` configures `--skipLibCheck` and `--moduleResolution
 bundler` so the type check is reproducible without depending on transitive
 type packages of the user's installed pi.
-
