@@ -55,10 +55,7 @@ import type {
 	TextContent,
 	ThinkingContent,
 } from "@earendil-works/pi-ai";
-import {
-	createAssistantMessageEventStream,
-	getApiProvider,
-} from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const OPEN_TAG = "<think>";
@@ -132,6 +129,62 @@ interface ThinkingSegment {
 	/** Leading-whitespace-trimmed accumulated thinking text (what was emitted). */
 	text: string;
 	signature?: string;
+}
+
+/**
+ * Minimal `createAssistantMessageEventStream` factory. The original lives in
+ * `@earendil-works/pi-ai`, but the omp fork's `legacy-pi-ai-shim` (which
+ * re-exports pi-ai for compat with extensions written for vanilla pi) drops
+ * this symbol — `@oh-my-pi/pi-ai@15.x` removed it from its public surface.
+ * Re-implementing the contract locally keeps the extension working on both
+ * vanilla pi and omp without a forked dep.
+ *
+ * Matches the upstream shape: `push(event)` enqueues an event, `end()` closes
+ * the stream, and `Symbol.asyncIterator` yields queued events to the consumer
+ * (pi's `streamSimple` consumer) one at a time. Pushes after `end()` are
+ * silently dropped.
+ */
+function createAssistantMessageEventStream(): AssistantMessageEventStream {
+	type Event = Parameters<NonNullable<AssistantMessageEventStream["push"]>>[0];
+	type Awaiter = (r: IteratorResult<Event>) => void;
+	const queue: Event[] = [];
+	const awaiters: Awaiter[] = [];
+	let closed = false;
+
+	const push = (event: Event): void => {
+		if (closed) return;
+		if (awaiters.length > 0) {
+			awaiters.shift()!({ value: event, done: false });
+		} else {
+			queue.push(event);
+		}
+	};
+
+	const end = (): void => {
+		if (closed) return;
+		closed = true;
+		while (awaiters.length > 0) {
+			awaiters.shift()!({ value: undefined as unknown as Event, done: true });
+		}
+	};
+
+	return {
+		push,
+		end,
+		[Symbol.asyncIterator]() {
+			return {
+				next: (): Promise<IteratorResult<Event>> => {
+					if (queue.length > 0) {
+						return Promise.resolve({ value: queue.shift()!, done: false });
+					}
+					if (closed) {
+						return Promise.resolve({ value: undefined as unknown as Event, done: true });
+					}
+					return new Promise<IteratorResult<Event>>((resolve) => awaiters.push(resolve));
+				},
+			};
+		},
+	} as unknown as AssistantMessageEventStream;
 }
 
 /**
