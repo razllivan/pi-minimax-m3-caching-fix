@@ -5,21 +5,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Broken load under omp (and other Pi forks shipping pi-ai 15.x).**
-  `createAssistantMessageEventStream` was imported from `@earendil-works/pi-ai`,
-  but the omp fork's `legacy-pi-ai-shim` (which re-exports pi-ai for compat
-  with extensions written for vanilla pi) drops this symbol — `@oh-my-pi/pi-ai@15.x`
-  removed it from its public surface. The shim is the file omp routes the
-  `@earendil-works/pi-ai` import to, so the import resolved but the named
-  export was missing and `omp install` failed with `Export named
-  'createAssistantMessageEventStream' not found`. Replaced the import with
-  an in-file implementation of the same contract (`push`, `end`,
-  `Symbol.asyncIterator`) so the extension no longer depends on the
-  upstream factory being present. Same behavior for vanilla pi (which still
-  ships the upstream factory) and for omp (which does not).
-
 ### Added
 
 - **Tunable `contextWindow` via `m3-clean-overrides.json`.** The extension
