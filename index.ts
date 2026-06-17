@@ -23,34 +23,28 @@
  * Fail-soft behavior (S02)
  * ------------------------
  * The orchestrator must not crash the whole session when this extension
- * loads on a host that:
- *   (a) does not register the `openai-completions` driver
- *       (`getApiProvider("openai-completions")` returns `undefined`); or
- *   (b) refuses to accept a provider name conflict in
- *       `pi.registerProvider(spec.name, ...)` (validation error throws).
- *
- * The two failure paths are handled as skip+warn:
- *   - The driver is resolved once at extension load. If it is `undefined`,
- *     we record a TUI warning and skip the entire registration loop.
- *   - Each `pi.registerProvider` call is wrapped in try/catch. On throw
- *     we record a TUI warning naming the provider and continue with the
- *     next spec instead of letting the exception propagate.
+ * loads on a host that refuses to accept a provider name conflict in
+ * `pi.registerProvider(spec.name, ...)` (validation error throws). Each
+ * `pi.registerProvider` call is wrapped in try/catch; on throw we record
+ * a TUI warning naming the provider and continue with the next spec
+ * instead of letting the exception propagate.
  *
  * Warnings are deferred to `session_start` because `ctx.ui.notify` is
  * not available in the extension factory — the same precedent S01
  * established for `overrides.invalid` entries.
  *
- * Cross-host notes
- * ----------------
- * The static `import { getApiProvider } from "@earendil-works/pi-ai"`
- * is a known runtime gap on omp (MEM006 — omp exports
- * `getCustomApi`/`registerCustomApi` instead of `getApiProvider`/
- * `registerApiProvider`). T02 only catches the *runtime* case where
- * the import succeeded but the driver is not registered. The
- * static-import gap is the planned S04 slice.
+ * Top-level `streamSimple` bridge
+ * -------------------------------
+ * `streamSimple<TApi>(model, ctx, opts)` exists as a top-level export on
+ * all three Pi-family hosts (vanilla `@earendil-works/pi-ai@0.79.1`,
+ * gsd-pi's `@gsd/pi-ai` symlink facade, omp's `@oh-my-pi/pi-ai@16.0.2`).
+ * It dispatches to the built-in driver for `model.api`; the wrapper
+ * passes `{...model, api: "openai-completions"}` to reach the
+ * openai-completions driver without going through `getApiProvider` (which
+ * omp dropped in 16.0.2 — see MEM006).
  */
 
-import { getApiProvider } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai";
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -81,7 +75,7 @@ function makeProvider(
 	pi: ExtensionAPI,
 	spec: ProviderSpec,
 	contextWindow: number,
-	driver: ReturnType<typeof getApiProvider>,
+	streamSimpleFn: typeof streamSimple,
 	warnings: string[],
 ): boolean {
 	const api = spec.name as Api; // custom api id so only these models hit our handler
@@ -91,8 +85,7 @@ function makeProvider(
 			apiKey: spec.apiKey,
 			api,
 			streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
-				if (!driver) throw new Error("openai-completions api provider not registered");
-				const base = driver.streamSimple({ ...model, api: "openai-completions" }, context, options);
+				const base = streamSimpleFn({ ...model, api: "openai-completions" }, context, options);
 				return cleanStream(base);
 			},
 			models: [{
@@ -125,21 +118,14 @@ export default async function (pi: ExtensionAPI) {
 		? await loadOverrides(agentDir)
 		: { contextWindow: M3_DEFAULTS.contextWindow, invalid: [] };
 
-	// Resolve the openai-completions driver ONCE at extension load. If the
-	// host did not register it (a build where this driver is optional, or
-	// a fork that uses a different driver name), record one deferred
-	// warning and skip the whole registration loop — there is no point
-	// registering a provider whose streamSimple would throw on first call.
+	// Always run the registration loop. `streamSimple` is a top-level
+	// export on all three supported hosts; the openai-completions driver
+	// is reached by passing `{...model, api: "openai-completions"}` to it.
+	// If a host's `streamSimple` cannot handle that api, the call itself
+	// errors — that's the right surface, not a load-time warning.
 	const warnings: string[] = [];
-	const driver = getApiProvider("openai-completions");
-	if (!driver) {
-		warnings.push(
-			"m3-clean: openai-completions api provider is not registered on this host. Skipping all provider registrations.",
-		);
-	} else {
-		for (const spec of PROVIDERS) {
-			makeProvider(pi, spec, overrides.contextWindow, driver, warnings);
-		}
+	for (const spec of PROVIDERS) {
+		makeProvider(pi, spec, overrides.contextWindow, streamSimple, warnings);
 	}
 
 	// Surface every deferred warning at session_start. Two producers feed
