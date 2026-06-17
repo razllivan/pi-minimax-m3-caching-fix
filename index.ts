@@ -19,6 +19,35 @@
  * parser in `./src/core/overrides.ts`; the provider metadata in
  * `./src/core/providers.ts`. This file is the orchestrator: discovers
  * the agent dir, loads overrides, and registers the two providers.
+ *
+ * Fail-soft behavior (S02)
+ * ------------------------
+ * The orchestrator must not crash the whole session when this extension
+ * loads on a host that:
+ *   (a) does not register the `openai-completions` driver
+ *       (`getApiProvider("openai-completions")` returns `undefined`); or
+ *   (b) refuses to accept a provider name conflict in
+ *       `pi.registerProvider(spec.name, ...)` (validation error throws).
+ *
+ * The two failure paths are handled as skip+warn:
+ *   - The driver is resolved once at extension load. If it is `undefined`,
+ *     we record a TUI warning and skip the entire registration loop.
+ *   - Each `pi.registerProvider` call is wrapped in try/catch. On throw
+ *     we record a TUI warning naming the provider and continue with the
+ *     next spec instead of letting the exception propagate.
+ *
+ * Warnings are deferred to `session_start` because `ctx.ui.notify` is
+ * not available in the extension factory — the same precedent S01
+ * established for `overrides.invalid` entries.
+ *
+ * Cross-host notes
+ * ----------------
+ * The static `import { getApiProvider } from "@earendil-works/pi-ai"`
+ * is a known runtime gap on omp (MEM006 — omp exports
+ * `getCustomApi`/`registerCustomApi` instead of `getApiProvider`/
+ * `registerApiProvider`). T02 only catches the *runtime* case where
+ * the import succeeded but the driver is not registered. The
+ * static-import gap is the planned S04 slice.
  */
 
 import { getApiProvider } from "@earendil-works/pi-ai";
@@ -48,29 +77,46 @@ async function resolveAgentDir(): Promise<string | undefined> {
 	return undefined;
 }
 
-function makeProvider(pi: ExtensionAPI, spec: ProviderSpec, contextWindow: number) {
+function makeProvider(
+	pi: ExtensionAPI,
+	spec: ProviderSpec,
+	contextWindow: number,
+	driver: ReturnType<typeof getApiProvider>,
+	warnings: string[],
+): boolean {
 	const api = spec.name as Api; // custom api id so only these models hit our handler
-	pi.registerProvider(spec.name, {
-		baseUrl: spec.baseUrl,
-		apiKey: spec.apiKey,
-		api,
-		streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
-			const driver = getApiProvider("openai-completions");
-			if (!driver) throw new Error("openai-completions api provider not registered");
-			const base = driver.streamSimple({ ...model, api: "openai-completions" }, context, options);
-			return cleanStream(base);
-		},
-		models: [{
-			id: "MiniMax-M3",
-			name: spec.label,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { ...M3_DEFAULTS.cost },
-			contextWindow,
-			maxTokens: M3_DEFAULTS.maxTokens,
-			compat: M3_COMPAT,
-		}],
-	});
+	try {
+		pi.registerProvider(spec.name, {
+			baseUrl: spec.baseUrl,
+			apiKey: spec.apiKey,
+			api,
+			streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
+				if (!driver) throw new Error("openai-completions api provider not registered");
+				const base = driver.streamSimple({ ...model, api: "openai-completions" }, context, options);
+				return cleanStream(base);
+			},
+			models: [{
+				id: "MiniMax-M3",
+				name: spec.label,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { ...M3_DEFAULTS.cost },
+				contextWindow,
+				maxTokens: M3_DEFAULTS.maxTokens,
+				compat: M3_COMPAT,
+			}],
+		});
+		return true;
+	} catch (err) {
+		// registerProvider throws on validation error (e.g. duplicate name
+		// when the host's built-in provider collides with our spec). Surface
+		// via the deferred session_start notification and skip this provider.
+		const reason = err instanceof Error ? err.message : String(err);
+		warnings.push(
+			`m3-clean: failed to register provider "${spec.name}" — ${reason}. Skipping.`,
+		);
+		return false;
+	}
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -79,20 +125,38 @@ export default async function (pi: ExtensionAPI) {
 		? await loadOverrides(agentDir)
 		: { contextWindow: M3_DEFAULTS.contextWindow, invalid: [] };
 
-	for (const spec of PROVIDERS) makeProvider(pi, spec, overrides.contextWindow);
+	// Resolve the openai-completions driver ONCE at extension load. If the
+	// host did not register it (a build where this driver is optional, or
+	// a fork that uses a different driver name), record one deferred
+	// warning and skip the whole registration loop — there is no point
+	// registering a provider whose streamSimple would throw on first call.
+	const warnings: string[] = [];
+	const driver = getApiProvider("openai-completions");
+	if (!driver) {
+		warnings.push(
+			"m3-clean: openai-completions api provider is not registered on this host. Skipping all provider registrations.",
+		);
+	} else {
+		for (const spec of PROVIDERS) {
+			makeProvider(pi, spec, overrides.contextWindow, driver, warnings);
+		}
+	}
 
-	// Surface validation errors via TUI. A missing file is silent — only
-	// malformed entries get notified. `ctx` is not available in the factory,
-	// so defer to `session_start`.
-	if (overrides.invalid.length > 0) {
-		const invalid = overrides.invalid;
+	// Surface every deferred warning at session_start. Two producers feed
+	// this same handler: the override-file validation errors from S01
+	// (`overrides.invalid`) and the fail-soft warnings from S02 (driver
+	// missing, registerProvider thrown). They are merged into one
+	// session_start handler so the user sees one grouped banner instead
+	// of several competing toasts.
+	const allWarnings: string[] = warnings.slice();
+	for (const err of overrides.invalid) {
+		allWarnings.push(
+			`m3-clean-overrides: ${err.provider}/${err.modelId}.${err.field} — ${err.reason}. Falling back to default.`,
+		);
+	}
+	if (allWarnings.length > 0) {
 		pi.on("session_start", (_event, ctx) => {
-			for (const err of invalid) {
-				ctx.ui.notify(
-					`m3-clean-overrides: ${err.provider}/${err.modelId}.${err.field} — ${err.reason}. Falling back to default.`,
-					"error",
-				);
-			}
+			for (const msg of allWarnings) ctx.ui.notify(msg, "warning");
 		});
 	}
 }
