@@ -31,8 +31,10 @@ const M3_COMPAT = {
 };
 
 /** Built-in defaults. Used when `m3-clean-overrides.json` is missing or a
- *  field is not present in it. */
-const M3_DEFAULTS = {
+ *  field is not present in it. Exported because `overrides.ts` needs to
+ *  seed the result with `M3_DEFAULTS.contextWindow` before merging the
+ *  user's override file. */
+export const M3_DEFAULTS = {
 	contextWindow: 1_000_000,
 	maxTokens: 512_000,
 	cost: { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
