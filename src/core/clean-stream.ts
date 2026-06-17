@@ -10,22 +10,27 @@
  * only starts visible text at its first non-whitespace character.
  *
  * This file has zero imports from other core modules (./providers,
- * ./overrides). It depends only on `@earendil-works/pi-ai` types and the
- * `createAssistantMessageEventStream` factory. `makeProvider` (which uses
- * `getApiProvider` and `cleanStream`) stays in `index.ts` for now; T04 is
- * the actual swap step that wires this file into the entry point. Until
- * then `index.ts` and `clean-stream.ts` each define their own copy of the
- * symbols — tsc does not flag re-declarations across separate files
- * because each file is its own module scope.
+ * ./overrides). It depends only on `@earendil-works/pi-ai` types and
+ * `AssistantMessageEventStream`. `makeProvider` (which uses `getApiProvider`
+ * and `cleanStream`) stays in `index.ts` for now; T04 is the actual swap
+ * step that wires this file into the entry point. Until then `index.ts`
+ * and `clean-stream.ts` each define their own copy of the symbols — tsc
+ * does not flag re-declarations across separate files because each file is
+ * its own module scope.
+ *
+ * The 0.79.x factory `createAssistantMessageEventStream()` was a wrapper
+ * around the class constructor; switching to `new AssistantMessageEventStream()`
+ * is behavior-preserving and works on all three Pi-family hosts (vanilla pi
+ * 0.79.1, gsd 1.2.0, omp 16.0.2).
  */
 
+import * as piAi from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	TextContent,
 	ThinkingContent,
 } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 const OPEN_TAG = "<think>";
 const CLOSE_TAG = "</think>";
@@ -108,7 +113,16 @@ interface ThinkingSegment {
 function cleanStream(
 	base: AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const out = createAssistantMessageEventStream();
+	// tsc with `moduleResolution: bundler` resolves the d.ts re-export
+	// `export * from "./utils/event-stream.ts"` as type-only (TS1362), even
+	// though the runtime class is exported as a value. Read the value from
+	// the namespace import (which tsc treats as a structural value bag) so
+	// we don't name the type-only export as a value. At runtime, the class
+	// is present on the namespace under vanilla pi, gsd, and omp.
+	type AMESConstructor = new () => AssistantMessageEventStream;
+	const AMES = (piAi as unknown as { AssistantMessageEventStream: AMESConstructor })
+		.AssistantMessageEventStream;
+	const out = new AMES();
 
 	void (async () => {
 		let output: AssistantMessage | undefined;
