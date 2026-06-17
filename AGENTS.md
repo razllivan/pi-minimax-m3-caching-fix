@@ -79,6 +79,94 @@ with open('PATH/TO/SESSION.jsonl') as f:
 
 Healthy numbers: turn 1 `input ~ 9000, cacheRead ~ 100`. Turn 2+ `input ~ 100, cacheRead ~ 9000+`.
 
+## Multi-host support
+
+The extension targets three pi-family hosts. Each one discovers the
+extension through its own loader and resolves `getAgentDir()` /
+`getApiProvider` from its own bundled `@…/pi-coding-agent` and
+`@…/pi-ai` packages. Per-host paths and peer pins are documented in
+the subsections below; the runtime contract for each host is the
+source of truth for the matching peer/dev pin in `package.json`.
+
+### Override-file path per host
+
+The active agent config directory is resolved dynamically by importing
+`getAgentDir()` from whichever `@…/pi-coding-agent` package the host
+exposes, with a silent fallback to defaults if none is installed. The
+override file (`m3-clean-overrides.json`) lives in the per-host
+agent dir:
+
+| Pi fork        | Path                                   |
+| -------------- | -------------------------------------- |
+| vanilla pi     | `~/.pi/agent/m3-clean-overrides.json`  |
+| omp            | `~/.omp/agent/m3-clean-overrides.json` |
+| gsd            | `~/.gsd/agent/m3-clean-overrides.json` |
+
+This mirrors the README's "Tuning context window" table — see that
+section for the override-file schema and the "first valid
+`contextWindow` wins" rule.
+
+### Peer pin per host
+
+`package.json` declares `peerDependencies` and `devDependencies` for
+two of the three hosts. The peer pin is what surfaces a warning to
+consumers on install when their installed version differs from the
+pinned one — that warning is the intended signal; version drift is
+loud rather than silent.
+
+| Pi fork        | Peer pin                                                |
+| -------------- | ------------------------------------------------------- |
+| vanilla pi     | `@earendil-works/pi-{ai,coding-agent}@0.79.1`           |
+| omp            | `@oh-my-pi/pi-{ai,coding-agent}@16.0.2`                 |
+| gsd            | _runtime compatibility only — no peer pin (see below)_  |
+
+### gsd has no peer pin on purpose
+
+`gsd-pi` (the published npm package) ships the internal package name
+`@gsd/pi-coding-agent`, which is **not** published to the npm
+registry — `npm view @gsd/pi-coding-agent` returns 404. A
+`peerDependencies` entry of `@gsd/pi-coding-agent` in our
+`package.json` would therefore break `pnpm install` for the gsd
+install path. gsd-pi's `dist/loader.js` prepends its own
+`node_modules/` to `NODE_PATH` at runtime, which injects
+`@gsd/pi-coding-agent` into the module resolution path; that is why
+the extension's `resolveAgentDir` fallback chain still finds a match
+on a host running gsd-pi (it falls through to `@gsd/pi-coding-agent`
+when neither the vanilla nor the omp package is installed).
+Documenting the runtime contract here and in `README.md` is the right
+surface for gsd compatibility; declaring it in `package.json` is
+impossible.
+
+### omp has a known static-import gap (planned S04)
+
+The current `index.ts` does a static
+`import { getApiProvider } from "@earendil-works/pi-ai"`. omp's
+`@oh-my-pi/pi-ai@16.0.2` does **not** export that symbol — it exposes
+`getCustomApi` / `registerCustomApi` instead. T02's fail-soft only
+catches the *runtime* case (the import succeeded but the driver is
+not registered, or `registerProvider` throws). The static-import gap
+is the planned S04 slice. Until S04 ships, the omp install path
+works only if omp users also have `@earendil-works/pi-ai` resolvable
+in their `node_modules/` (e.g. via a separate pi install on the
+same machine). This is a known limitation, not a configuration
+mistake.
+
+### Fail-soft behavior (S02)
+
+The orchestrator does not crash the whole session when this extension
+loads on a host that:
+
+- (a) does not register the `openai-completions` driver
+  (`getApiProvider("openai-completions")` returns `undefined`); or
+- (b) refuses to accept a provider name conflict in
+  `pi.registerProvider(spec.name, ...)` (validation error throws).
+
+Both cases record a TUI warning that surfaces at `session_start` and
+skip the affected registration(s) — no exception propagates out of
+the extension factory. Warnings are deferred to `session_start`
+because `ctx.ui.notify` is not available in the extension factory —
+the same precedent the override-file validation errors use.
+
 ## Critical learnings
 
 ### 1. The user's installed `pi-ai@0.79.1` does NOT have `compat.skipThinkingBlock`

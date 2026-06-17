@@ -32,6 +32,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   Invalid `contextWindow` values (non-positive or non-numeric) are
   reported via a TUI notification at `session_start` and the field falls
   back to the default.
+- **Multi-host peer pins for `omp`.** `package.json` declares
+  `peerDependencies` and `devDependencies` for
+  `@oh-my-pi/pi-coding-agent@16.0.2` and `@oh-my-pi/pi-ai@16.0.2`
+  alongside the existing vanilla-pi pins. Both pins are surfaced to
+  consumers as a `peerDependencies` warning on install when the user's
+  installed version differs — the warning is the intended signal, not
+  a configuration mistake. The full per-host contract is documented in
+  `AGENTS.md` under "Multi-host support".
+- **Runtime compatibility with `gsd-pi`.** The extension is also
+  supported on the gsd fork (shipped as `gsd-pi` on npm). It is not
+  pinned in `package.json` because its internal package name
+  (`@gsd/pi-coding-agent`) is not published to the npm registry —
+  `npm view @gsd/pi-coding-agent` returns 404. gsd-pi's loader injects
+  `@gsd/pi-coding-agent` into the module path at runtime, so the
+  extension's existing `resolveAgentDir` fallback chain still finds a
+  match on a host running gsd-pi. This is documented as a known-
+  compatible fork in `AGENTS.md`; declaring it in `package.json` is
+  impossible (a peer pin would fail `pnpm install` with 404).
+- **Fail-soft provider registration.** `index.ts` resolves the
+  `openai-completions` driver once at extension load and wraps every
+  `pi.registerProvider` call in a try/catch. A missing driver
+  (`getApiProvider("openai-completions")` returns `undefined`) and a
+  `registerProvider` validation throw both record a TUI warning that
+  surfaces at `session_start` and skip the affected provider(s)
+  instead of letting the exception propagate and crash the session.
 
 ## [0.2.0] - 2026-06-12
 
