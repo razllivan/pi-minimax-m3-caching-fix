@@ -5,7 +5,8 @@
 # Always published (cannot be excluded):
 #   - package.json
 #   - README, LICENSE, CHANGELOG
-#   - entry points listed in `files`
+#   - entry points listed in `files` — currently `index.ts` and `src/**/*.ts`
+#     (orchestrator + the three core modules under src/core/)
 
 # Dev / build
 tsconfig.json

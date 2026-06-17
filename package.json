@@ -5,7 +5,7 @@
 	"type": "module",
 	"keywords": ["pi-package", "minimax", "minimax-m3", "caching"],
 	"license": "MIT",
-	"files": ["index.ts", "README.md", "LICENSE", "CHANGELOG.md"],
+	"files": ["index.ts", "src/**/*.ts", "README.md", "LICENSE", "CHANGELOG.md"],
 	"scripts": {
 		"check": "tsc -p tsconfig.json",
 		"prepublishOnly": "npm run check"

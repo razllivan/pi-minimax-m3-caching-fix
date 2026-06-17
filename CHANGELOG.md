@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Modularized core logic.** The 640-line `index.ts` is split into four
+  files: `index.ts` (orchestrator — agent-dir discovery, `makeProvider`,
+  default-export factory), `src/core/providers.ts` (pure-constant provider
+  metadata: `M3_COMPAT`, `M3_DEFAULTS`, `PROVIDERS`, `ProviderSpec`),
+  `src/core/overrides.ts` (`m3-clean-overrides.json` parser and types),
+  and `src/core/clean-stream.ts` (`ThinkScanner` and the `cleanStream`
+  stream wrapper). No behavior change — the registered providers, the
+  stream wrapper semantics, and the override-file format are identical.
+  `package.json` `files` whitelist now includes `src/**/*.ts` so the new
+  files ship in the published tarball.
+
 ### Added
 
 - **Tunable `contextWindow` via `m3-clean-overrides.json`.** The extension

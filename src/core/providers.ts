@@ -23,7 +23,7 @@ import type { Api } from "@earendil-works/pi-ai";
  *  endpoint. `supportsStore: false` is what enables the extension's whole
  *  reason for being — it keeps the request off pi-ai's `anthropic-messages`
  *  cache control path. */
-const M3_COMPAT = {
+export const M3_COMPAT = {
 	supportsStore: false,
 	supportsDeveloperRole: false,
 	supportsReasoningEffort: false,
@@ -40,14 +40,14 @@ export const M3_DEFAULTS = {
 	cost: { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
 } as const;
 
-interface ProviderSpec {
+export interface ProviderSpec {
 	name: string;
 	baseUrl: string;
 	apiKey: string;
 	label: string;
 }
 
-const PROVIDERS: readonly ProviderSpec[] = [
+export const PROVIDERS: readonly ProviderSpec[] = [
 	{
 		name: "minimax-m3-clean",
 		baseUrl: "https://api.minimax.io/v1",
