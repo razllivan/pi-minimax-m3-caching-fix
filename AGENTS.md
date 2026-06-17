@@ -137,45 +137,54 @@ Documenting the runtime contract here and in `README.md` is the right
 surface for gsd compatibility; declaring it in `package.json` is
 impossible.
 
-### omp has a known static-import gap (planned S04)
+### omp install path is now functional (S04)
 
-The current `index.ts` does a static
-`import { getApiProvider } from "@earendil-works/pi-ai"`. omp's
-`@oh-my-pi/pi-ai@16.0.2` does **not** export that symbol — it exposes
-`getCustomApi` / `registerCustomApi` instead. T02's fail-soft only
-catches the *runtime* case (the import succeeded but the driver is
-not registered, or `registerProvider` throws). The static-import gap
-is the planned S04 slice. Until S04 ships, the omp install path
-works only if omp users also have `@earendil-works/pi-ai` resolvable
-in their `node_modules/` (e.g. via a separate pi install on the
-same machine). This is a known limitation, not a configuration
-mistake.
+S04 closed the static-import gap (see MEM006 + MEM013). The previous
+`index.ts` did a static `import { getApiProvider } from "@earendil-works/pi-ai"`
+and called `getApiProvider("openai-completions").streamSimple(...)`.
+omp's `@oh-my-pi/pi-ai@16.0.2` does **not** export `getApiProvider` —
+it exposes `getCustomApi` / `registerCustomApi` instead — so the
+static import would have crashed the extension load on omp.
+
+S04 replaced both host-fragile symbols with cross-host bridges that
+exist on all three Pi forks:
+
+- `getApiProvider("openai-completions").streamSimple(...)` →
+  top-level `streamSimple<TApi>(model, ctx, opts)`. The wrapper now
+  passes `{ ...model, api: "openai-completions" }` to the top-level
+  function, which dispatches to the built-in driver for that api
+  without going through `getApiProvider`.
+- `createAssistantMessageEventStream()` (used inside the `cleanStream`
+  factory) → `new AssistantMessageEventStream()`. The cross-host
+  class constructor exists on all three `@…/pi-ai` versions.
+
+The defensive "openai-completions driver not registered" warning
+path (the `if (!driver) throw` guard around the imported
+`getApiProvider` result) is also gone — if a host's top-level
+`streamSimple` cannot handle the `openai-completions` api, the
+underlying driver call now errors at runtime, which is the right
+surface for that failure. After S04: `pi --list-models` on omp shows
+both `minimax-m3-clean` and `minimax-cn-m3-clean`, and a real
+streaming turn on omp produces a session log entry with `cacheRead`
+metrics.
 
 ### Fail-soft behavior (S02)
 
 The orchestrator does not crash the whole session when this extension
-loads on a host that:
-
-- (a) does not register the `openai-completions` driver
-  (`getApiProvider("openai-completions")` returns `undefined`); or
-- (b) refuses to accept a provider name conflict in
-  `pi.registerProvider(spec.name, ...)` (validation error throws).
-
-Both cases record a TUI warning that surfaces at `session_start` and
-skip the affected registration(s) — no exception propagates out of
-the extension factory. Warnings are deferred to `session_start`
-because `ctx.ui.notify` is not available in the extension factory —
-the same precedent the override-file validation errors use.
+loads on a host that refuses to accept a provider name conflict in
+`pi.registerProvider(spec.name, ...)` (validation error throws). In
+that case the call is wrapped in try/catch; on throw the affected
+provider is skipped and a TUI warning naming the provider is
+deferred to `session_start` — no exception propagates out of the
+extension factory. Warnings are deferred to `session_start` because
+`ctx.ui.notify` is not available in the extension factory — the
+same precedent the override-file validation errors use.
 
 ## Critical learnings
 
 ### 1. The user's installed `pi-ai@0.79.1` does NOT have `compat.skipThinkingBlock`
 
-The upstream fix `pi-mono@b85b91c9` adds it; the published npm version 0.79.1 predates that commit. **Do not** set `compat.skipThinkingBlock: true` in `registerProvider` — the field doesn't exist in the type, tsc will fail. Either:
-- (chosen) strip thinking via a `message_end` hook at end-of-stream, or
-- cast `compat` to bypass tsc and accept that the field is ignored at runtime
-
-The original reasoning for the `message_end` approach (brief visual flash during streaming; session log stays clean) is summarized inline in `index.ts`'s file header.
+The upstream fix `pi-mono@b85b91c9` adds it; the published npm version 0.79.1 predates that commit. **Do not** set `compat.skipThinkingBlock: true` in `registerProvider` — the field doesn't exist in the type, tsc will fail. The post-0.1.0 code path strips thinking in flight (see §4 below) and never touches `compat.skipThinkingBlock`. If the upstream field does land in a future `@earendil-works/pi-ai`, do not enable it here without first removing the in-flight `cleanStream` wrapper — the two paths are not safe to combine.
 
 ### 2. `pi.registerProvider(name, { models })` REPLACES all models for that provider
 
@@ -185,11 +194,19 @@ Overriding the built-in `minimax` provider would wipe M2.x. Use distinct names (
 
 `ModelRegistry.hasConfiguredAuth()` checks `isConfigValueConfigured(providerApiKey)`. If the env var referenced by `$MINIMAX_CN_API_KEY` is unset, the `minimax-cn-m3-cache-fixed` provider is silently dropped from `pi --list-models`. This is intentional; users without CN auth don't see the CN option. To verify both providers, set both env vars (or set `MINIMAX_CN_API_KEY=dummy` for testing).
 
-### 4. `message_end` can replace the final message but `message_update` cannot
+### 4. `message_end` is no longer used — `cleanStream` wraps the openai-completions stream in flight
 
-The agent emits `message_update` for each streaming delta; the event is observable but read-only — the extension cannot mutate the streaming display. `message_end` returns `MessageEndEventResult` with an optional `message` field; if returned, the agent replaces the final message in place via `_replaceMessageInPlace`. The replacement must keep the original message role.
-
-Upstream's `skipThinkingBlock` strips markers on `message_update` (cleaner live display). Our hook only cleans at `message_end` — there's a brief visual flash of `<think>…</think>` during streaming before the hook replaces the final message.
+0.2.0 reworked the cleanup strategy from post-hoc to in-flight. The
+`cleanStream` wrapper in `src/core/clean-stream.ts` wraps the built-in
+`openai-completions` driver and rewrites the event stream in real
+time via the `ThinkScanner`: duplicated thinking from M3's
+`reasoning_content` / `reasoning` alternation is suppressed, and
+`<think>…</think>` spans are filtered out of text deltas (with their
+inner content routed to a real thinking block when no reasoning
+fields are streamed). The `message_end` hook that 0.1.0 used for the
+post-hoc strip is no longer registered — in 0.2.0+ the live display
+is clean by the time the assistant message finishes streaming, and
+no end-of-turn mutation is needed.
 
 ### 5. `registerProvider` accepts `$ENV_VAR` syntax for `apiKey`
 

@@ -17,6 +17,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   stream wrapper semantics, and the override-file format are identical.
   `package.json` `files` whitelist now includes `src/**/*.ts` so the new
   files ship in the published tarball.
+- **omp install path is now functional.** Replaced
+  `getApiProvider("openai-completions").streamSimple` with the
+  top-level `streamSimple<TApi>(model, ctx, opts)` function (exists on
+  vanilla `@earendil-works/pi-ai@0.79.1`, gsd-pi's `@gsd/pi-ai`
+  symlink, and omp's `@oh-my-pi/pi-ai@16.0.2`). Replaced
+  `createAssistantMessageEventStream()` factory call with
+  `new AssistantMessageEventStream()` (same cross-host coverage).
+  Dropped the defensive 'openai-completions driver not registered'
+  warning path. Both the omp `models` listing and a real omp
+  streaming turn now exercise the extension end-to-end.
 
 ### Added
 
