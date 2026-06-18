@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Added `streamIdleTimeoutMs: 30_000` to `M3_COMPAT` (MEM017).** omp
+  16.0.2's openai-completions driver enforces
+  `model.compat.streamIdleTimeoutMs` and previously errored with
+  "undefined is not an object" on the first request when the field was
+  missing (S04 T04 evidence record 150700a3). Vanilla
+  `@earendil-works/pi-ai@0.79.1` ignores the field, so this is a safe
+  additive change for vanilla pi users. Replaces the S04 T04 fallback
+  to the built-in `minimax-code/MiniMax-M3` provider on omp: the
+  registered `minimax-m3-clean` provider now streams a real turn on omp
+  with `cacheRead` metrics, no fallback needed.
+
 ### Changed
 
 - **Modularized core logic.** The 640-line `index.ts` is split into four

@@ -10,6 +10,13 @@
  * safely import `M3_DEFAULTS` from here, and `clean-stream.ts` (T03) does
  * not touch this file at all.
  *
+ * S05 addition: `streamIdleTimeoutMs: 30_000` is now part of `M3_COMPAT`.
+ * omp 16.0.2's openai-completions driver enforces
+ * `model.compat.streamIdleTimeoutMs` and errors with "undefined is not an
+ * object" at the first request when the field is missing (MEM017; surfaced
+ * in S04 T04 evidence record 150700a3). Vanilla `@earendil-works/pi-ai@0.79.1`
+ * ignores the field, so this is a safe additive change for vanilla pi users.
+ *
  * The constants here are unchanged from the previous `index.ts` definition
  * (verbatim move). `import type Api` is added in anticipation of T02/T03
  * work that will move `makeProvider` (which uses `Api` and `Model<Api>`)
@@ -22,12 +29,15 @@ import type { Api } from "@earendil-works/pi-ai";
 /** Driver compatibility flags for MiniMax-M3 on the OpenAI-compatible
  *  endpoint. `supportsStore: false` is what enables the extension's whole
  *  reason for being — it keeps the request off pi-ai's `anthropic-messages`
- *  cache control path. */
+ *  cache control path. `streamIdleTimeoutMs: 30_000` is required by omp's
+ *  openai-completions driver (per MEM017); vanilla pi 0.79.1 ignores the
+ *  field, so it is a safe additive change. */
 export const M3_COMPAT = {
 	supportsStore: false,
 	supportsDeveloperRole: false,
 	supportsReasoningEffort: false,
 	maxTokensField: "max_tokens" as const,
+	streamIdleTimeoutMs: 30_000,
 };
 
 /** Built-in defaults. Used when `m3-clean-overrides.json` is missing or a
