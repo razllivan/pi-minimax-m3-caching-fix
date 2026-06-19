@@ -11,7 +11,7 @@ with multi-host support and tunable context windows:
 
 - **Three Pi-family hosts, one install.** Runs on vanilla pi
   (`@earendil-works/pi-coding-agent@0.79.1`), the
-  [`gsd-pi`](https://github.com/opengsd/gsd-pi) fork, and
+  [`gsd-pi`](https://github.com/open-gsd/gsd-pi) fork, and
   [`Oh my Pi`](https://www.npmjs.com/search?q=%40oh-my-pi%2Fpi-coding-agent)
   (`@oh-my-pi/pi-coding-agent@16.0.2`). Pick the model with
   `(clean)` in the name in `/model` and the same provider name works

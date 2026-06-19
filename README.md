@@ -64,7 +64,7 @@ provider — no new credentials required:
 - **Works on three Pi-family hosts.** One install, same provider
   names regardless of which pi-family you run:
   - **vanilla pi** — [`@earendil-works/pi-coding-agent@0.79.1`](https://github.com/badlogic/pi-mono)
-  - **gsd-pi** — [`@opengsd/gsd-pi`](https://www.npmjs.com/package/@opengsd/gsd-pi) (a pi fork that ships its own gsd tooling). The gsd host is not pinned in `peerDependencies` because its internal package name is not published to npm; the extension's runtime `resolveAgentDir` fallback chain still finds a match via gsd-pi's loader-side `NODE_PATH` injection.
+  - **gsd-pi** — [`@opengsd/gsd-pi`](https://www.npmjs.com/package/@opengsd/gsd-pi) ([github.com/open-gsd/gsd-pi](https://github.com/open-gsd/gsd-pi)) (a pi fork that ships its own gsd tooling). The gsd host is not pinned in `peerDependencies` because its internal package name is not published to npm; the extension's runtime `resolveAgentDir` fallback chain still finds a match via gsd-pi's loader-side `NODE_PATH` injection.
   - **Oh my Pi (omp)** — [`@oh-my-pi/pi-coding-agent@16.0.2`](https://www.npmjs.com/search?q=%40oh-my-pi%2Fpi-coding-agent). Tested end-to-end on omp 16.0.2 with a real streaming turn: `cacheRead: 34751`, `stopReason: stop`, no fallback to the built-in provider needed.
   
   Pick the model with `(clean)` in the name in `/model` and the rest works the same on all three hosts.
