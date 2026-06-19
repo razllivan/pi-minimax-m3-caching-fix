@@ -34,14 +34,14 @@ get the fix on any pi version without waiting for an upstream release.
 From npm:
 
 ```bash
-pi install npm:pi-minimax-m3-caching-fix
+pi install npm:@razllivan/pi-minimax-m3-caching-fix
 ```
 
 From a git checkout (latest, or pinned):
 
 ```bash
 pi install git:github.com/razllivan/pi-minimax-m3-caching-fix
-pi install git:github.com/razllivan/pi-minimax-m3-caching-fix@v0.2.0
+pi install git:github.com/razllivan/pi-minimax-m3-caching-fix@v0.2.1
 ```
 
 For local development from a clone:
@@ -66,7 +66,7 @@ provider — no new credentials required:
 export MINIMAX_API_KEY="sk-..."
 
 # 2. Install the extension
-pi install npm:pi-minimax-m3-caching-fix
+pi install npm:@razllivan/pi-minimax-m3-caching-fix
 
 # 3. Restart any running pi session, then start one
 pi
@@ -214,7 +214,7 @@ When pi-mono ships a release that includes `b85b91c9` (or any release whose
 and `skipThinkingBlock: true`), retire the extension:
 
 ```bash
-pi remove npm:pi-minimax-m3-caching-fix
+pi remove npm:@razllivan/pi-minimax-m3-caching-fix
 ```
 
 The built-in `minimax / MiniMax-M3` model will then route correctly out of
