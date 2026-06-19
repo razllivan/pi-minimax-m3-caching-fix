@@ -3,7 +3,51 @@
 All notable changes to `pi-minimax-m3-caching-fix` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## Highlights (this fork)
+
+`@razllivan/pi-minimax-m3-caching-fix` is a fork of
+[`pi-minimax-m3-caching-fix@0.2.0`](https://www.npmjs.com/package/pi-minimax-m3-caching-fix)
+with multi-host support and tunable context windows:
+
+- **Three Pi-family hosts, one install.** Runs on vanilla pi
+  (`@earendil-works/pi-coding-agent@0.79.1`), the
+  [`gsd-pi`](https://github.com/opengsd/gsd-pi) fork, and
+  [`Oh my Pi`](https://www.npmjs.com/search?q=%40oh-my-pi%2Fpi-coding-agent)
+  (`@oh-my-pi/pi-coding-agent@16.0.2`). Pick the model with
+  `(clean)` in the name in `/model` and the same provider name works
+  on all three hosts. Empirical end-to-end evidence: a real omp
+  streaming turn with `cacheRead: 34751` and `stopReason: stop`.
+- **Tune the context window per host.** Drop a
+  `m3-clean-overrides.json` file in the active agent directory
+  (`~/.pi/agent/`, `~/.gsd/agent/`, or `~/.omp/agent/`) and the
+  registered `MiniMax-M3` model picks up your `contextWindow` on
+  startup. Invalid values (non-positive, non-numeric, non-integer)
+  are reported via a TUI notification at `session_start` and the
+  field falls back to the built-in 1M default. The file is read
+  from the host-correct agent dir — no env vars to set, no
+  cross-contamination on a multi-host dev machine.
+- **Fail-soft provider registration.** Missing drivers and
+  `registerProvider` validation throws no longer crash the
+  session; they surface as a single session_start TUI warning and
+  the affected provider is skipped. Safe to install on hosts
+  that don't have `openai-completions` registered.
+- **Per-host install-cycle verification.** Three bash scripts
+  (`T01-{pi,gsd,omp}-install-cycle.sh`) snapshot the host's
+  session log dir, run install → single-turn → remove, and assert
+  the new `.jsonl` session log appears at the host-correct path.
+  Self-contained `.mjs` regression checks (`tests/s07-install-cycle-check.mjs`)
+  lock the canonical provider name, the omp CLI form, the Windows
+  cwd-prefix glob, and the omp slash-form turn command.
+
+## [0.2.1] - 2026-06-19
+
+Fork of upstream `pi-minimax-m3-caching-fix@0.2.0`. All Unreleased
+changes from the in-flight-rewrite lineage are released as 0.2.1.
+Diff against upstream 0.2.0: this fork adds multi-host support,
+tunable `contextWindow`, fail-soft registration, and a host-aware
+agent-dir resolver; the in-flight thinking-cleanup wrapper, the two
+provider registrations, and the npm/git install paths are unchanged
+from upstream 0.2.0.
 
 ### Fixed
 
