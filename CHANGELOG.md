@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `pi-minimax-m3-caching-fix` are documented here.
+All notable changes to `@razllivan/pi-minimax-m3-caching-fix` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Highlights (this fork)
