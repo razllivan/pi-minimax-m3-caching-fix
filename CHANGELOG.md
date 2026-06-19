@@ -7,6 +7,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Wrapper-level `compat: M3_COMPAT` pass-through in `streamSimple`
+  bridge (MEM017 runtime half — MEM024 / MEM025).** The
+  `makeProvider` wrapper in `index.ts` now spreads
+  `compat: M3_COMPAT` into the object passed to the top-level
+  `streamSimple` bridge, so omp's openai-completions driver actually
+  receives `model.compat.streamIdleTimeoutMs: 30_000` at runtime.
+  Without this, `buildCompat` writes `compat: undefined` and omp
+  crashes on the first packet with "undefined is not an object
+  (evaluating 'model.compat.streamIdleTimeoutMs')". This is the
+  runtime half of MEM017; the source half — adding
+  `streamIdleTimeoutMs: 30_000` to `M3_COMPAT` itself — shipped in the
+  previous Unreleased entry. S04 T04 evidence record `150700a3`, S05
+  T01 evidence record `745198ad`. After this: the registered
+  `minimax-m3-clean / MiniMax-M3` provider streams a real turn on omp
+  with `cacheRead` metrics, no fallback to the built-in
+  `minimax-code / MiniMax-M3` needed.
+
+### Fixed
+
 - **Added `streamIdleTimeoutMs: 30_000` to `M3_COMPAT` (MEM017).** omp
   16.0.2's openai-completions driver enforces
   `model.compat.streamIdleTimeoutMs` and previously errored with

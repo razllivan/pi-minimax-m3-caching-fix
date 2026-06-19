@@ -39,9 +39,24 @@
  * all three Pi-family hosts (vanilla `@earendil-works/pi-ai@0.79.1`,
  * gsd-pi's `@gsd/pi-ai` symlink facade, omp's `@oh-my-pi/pi-ai@16.0.2`).
  * It dispatches to the built-in driver for `model.api`; the wrapper
- * passes `{...model, api: "openai-completions"}` to reach the
- * openai-completions driver without going through `getApiProvider` (which
- * omp dropped in 16.0.2 — see MEM006).
+ * passes `{...model, api: "openai-completions", compat: M3_COMPAT}` to
+ * reach the openai-completions driver without going through
+ * `getApiProvider` (which omp dropped in 16.0.2 — see MEM006).
+ *
+ * The explicit `compat: M3_COMPAT` in the spread is structural, not
+ * cosmetic: `pi.registerProvider` accepts a `compat` config and the
+ * model's `compat` is set at registration time, but `buildCompat` (in
+ * the host pi-ai) writes `compat: undefined` when the registered value
+ * is not recognized as a known compat. omp's openai-completions driver
+ * dereferences `model.compat.streamIdleTimeoutMs` on the first packet
+ * and crashes with "undefined is not an object" when the field is
+ * missing (S04 T04 evidence record 150700a3, S05 T01 evidence record
+ * 745198ad). Re-passing the canonical `M3_COMPAT` object here — instead
+ * of relying on whatever the registration path produced — guarantees
+ * the value the wrapper actually receives is the value the driver
+ * reads. This is the runtime half of MEM017 (MEM024 / MEM025); the
+ * source half (declaring `streamIdleTimeoutMs` on M3_COMPAT) shipped
+ * in S05.
  */
 
 import { stat } from "node:fs/promises";
@@ -201,7 +216,7 @@ function makeProvider(
 			apiKey: spec.apiKey,
 			api,
 			streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
-				const base = streamSimpleFn({ ...model, api: "openai-completions" }, context, options);
+				const base = streamSimpleFn({ ...model, api: "openai-completions", compat: M3_COMPAT }, context, options);
 				return cleanStream(base);
 			},
 			models: [{
