@@ -26,14 +26,14 @@
 		"@oh-my-pi/pi-coding-agent": "16.0.2",
 		"typescript": "5.6.3"
 	},
-	"author": "René Weselowski <rwese@users.noreply.github.com>",
+	"author": "razllivan (fork of René Weselowski's https://github.com/rwese/pi-minimax-m3-caching-fix)",
 	"packageManager": "pnpm@10.33.0",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/rwese/pi-minimax-m3-caching-fix.git"
+		"url": "git+https://github.com/razllivan/pi-minimax-m3-caching-fix.git"
 	},
-	"homepage": "https://github.com/rwese/pi-minimax-m3-caching-fix#readme",
+	"homepage": "https://github.com/razllivan/pi-minimax-m3-caching-fix#readme",
 	"bugs": {
-		"url": "https://github.com/rwese/pi-minimax-m3-caching-fix/issues"
+		"url": "https://github.com/razllivan/pi-minimax-m3-caching-fix/issues"
 	}
 }

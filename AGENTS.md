@@ -54,10 +54,10 @@ Local install is reversible; doesn't pollute the user's global package list.
 
 ```bash
 mkdir -p /tmp/pi-m3-test && cd /tmp/pi-m3-test
-pi install -l /Users/wese/Repos/github.com/rwese/pi-minimax-m3-caching-fix
+pi install -l ./
 pi --provider minimax-m3-cache-fixed --model MiniMax-M3 --session-id my-test-1 -p "We are testing prompt caching. Acknowledge briefly."
 pi --provider minimax-m3-cache-fixed --model MiniMax-M3 -c -p "What are we testing?"
-# session log: /Users/wese/.pi/agent/sessions/--private-tmp-pi-m3-test--/*my-test-1*.jsonl
+# session log: ~/.pi/agent/sessions/--private-tmp-pi-m3-test--/*my-test-1*.jsonl
 ```
 
 `--session-id` cannot be combined with `-c`; subsequent turns drop `--session-id` and use `-c` alone. The `~/.pi/agent/sessions/` paths use `private-` prefix for `/private/tmp/...` (macOS `/tmp` symlink target).
