@@ -39,6 +39,45 @@ with multi-host support and tunable context windows:
   lock the canonical provider name, the omp CLI form, the Windows
   cwd-prefix glob, and the omp slash-form turn command.
 
+## [0.2.2] - 2026-06-19
+
+Patch release — documentation and metadata only. No source changes;
+the extension behaves identically to 0.2.1 at runtime.
+
+### Fixed
+
+- **gsd-pi GitHub link in `CHANGELOG.md` and `README.md`.** The
+  previous link `github.com/opengsd/gsd-pi` resolves to HTTP 404 on
+  GitHub; the live repo is at `github.com/open-gsd/gsd-pi` (hyphen
+  between `open` and `gsd`, matching the homepage field in the
+  `@opengsd/gsd-pi` npm registry). The npm package name and scope
+  (`@opengsd/gsd-pi`) are unchanged — only the GitHub URL was wrong.
+
+### Changed
+
+- **README `Features` section added.** New section between the
+  Provider/Env-var table and Quickstart. Two bullets: 'Works on
+  three Pi-family hosts' (enumerates vanilla pi, gsd-pi, Oh my Pi
+  with package names and version pins, with the corrected
+  `github.com/open-gsd/gsd-pi` link) and 'Tunable `contextWindow`'
+  (short summary with anchor link to the detailed 'Tuning context
+  window' section).
+- **CHANGELOG header now references the scoped package name.**
+  'All notable changes to `pi-minimax-m3-caching-fix`' ->
+  '`@razllivan/pi-minimax-m3-caching-fix`'. The body still cites
+  upstream 0.2.0 under the unscoped name on purpose (it is the
+  upstream version this fork was branched from, not a name we
+  own).
+- **README install/remove commands updated to scoped package name.**
+  `pi install npm:pi-minimax-m3-caching-fix` ->
+  `pi install npm:@razllivan/pi-minimax-m3-caching-fix` (3
+  occurrences: 'From npm' section, Quickstart, 'Removing the
+  extension' section). Git-install examples in 'From a git
+  checkout' and the pinned `@v0.2.1` example updated to match
+  the latest release tag. Local-clone path
+  `pi install ./pi-minimax-m3-caching-fix` left unchanged (the
+  directory name is independent of the npm package name).
+
 ## [0.2.1] - 2026-06-19
 
 Fork of upstream `pi-minimax-m3-caching-fix@0.2.0`. All Unreleased
