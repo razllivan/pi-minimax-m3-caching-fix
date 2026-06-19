@@ -40,14 +40,14 @@ pi install npm:pi-minimax-m3-caching-fix
 From a git checkout (latest, or pinned):
 
 ```bash
-pi install git:github.com/rwese/pi-minimax-m3-caching-fix
-pi install git:github.com/rwese/pi-minimax-m3-caching-fix@v0.2.0
+pi install git:github.com/razllivan/pi-minimax-m3-caching-fix
+pi install git:github.com/razllivan/pi-minimax-m3-caching-fix@v0.2.0
 ```
 
 For local development from a clone:
 
 ```bash
-git clone https://github.com/rwese/pi-minimax-m3-caching-fix
+git clone https://github.com/razllivan/pi-minimax-m3-caching-fix
 pi install ./pi-minimax-m3-caching-fix
 ```
 
