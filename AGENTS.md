@@ -106,6 +106,49 @@ This mirrors the README's "Tuning context window" table — see that
 section for the override-file schema and the "first valid
 `contextWindow` wins" rule.
 
+#### Multi-host install: S06 fix (MEM018)
+
+Before S06, `resolveAgentDir()` probed `@earendil-works/pi-coding-agent`
+first, then the omp and gsd packages. On a **multi-host dev machine**
+(all three pi-family packages present in `node_modules/`, e.g. an
+extension author who tests against all three hosts), the probe order
+mattered: if `PI_PACKAGE_DIR` was set globally (gsd-pi's loader sets
+`PI_PACKAGE_DIR=…/@opengsd/gsd-pi/pkg` to inject its own package
+resolution), the vanilla `@earendil-works/pi-coding-agent.getAgentDir()`
+returned `~/.gsd/agent` even when the active host was `pi` or `omp`.
+This is the MEM011 / MEM018 collision — the `getAgentDir()` call alone
+cannot disambiguate the active host on a contaminated `node_modules/`
+setup, so all three hosts would end up reading `~/.gsd/agent` (or
+whichever dir the env-var shuffle resolved first). User override
+files in the correct `~/.pi/agent/` or `~/.omp/agent/` directory
+were silently ignored.
+
+S06 closed this with a host-aware priority chain in `resolveAgentDir()`:
+
+1. **`M3_CLEAN_AGENT_DIR` env override** — validated for existence;
+   if the dir is missing, log a debug-level warning and fall through.
+2. **Host detection** — `process.versions.bun` (omp's runtime
+   fingerprint) first, then a normalized `process.argv[1]` substring
+   match (`@opengsd/gsd-pi` or `gsd-pi/dist/loader` → gsd;
+   `@earendil-works/pi-coding-agent` or `pi-coding-agent/dist/cli` →
+   vanilla pi). The gsd check is intentionally placed before the pi
+   check because gsd's path also contains `pi-coding-agent` (the
+   `@gsd/pi-coding-agent` re-export sits under that directory).
+3. **Per-host package-probe order** — the matching host's package is
+   tried first, then vanilla pi (the legacy-pi-compat rewrite for omp
+   per MEM013 means vanilla is often the resolved module under omp),
+   then the remaining host as last resort.
+4. **Legacy order** — only reached if no host is detectable
+   (future rebranded host). Same order as the pre-S06 behavior, so
+   single-host installs are unaffected.
+
+A `console.debug` line at extension-load time logs
+`[m3-clean] host=<host> agentDir=<path>`, so users can diagnose
+cross-contamination by redirecting stderr (`2>debug.log`). The
+priority-1 override is exposed as `host=override` in the log so
+test escape hatches are visible. `tests/s06-resolve-agent-dir.mjs`
+regression check covers the argv-matching logic.
+
 ### Peer pin per host
 
 `package.json` declares `peerDependencies` and `devDependencies` for

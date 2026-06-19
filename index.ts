@@ -44,6 +44,8 @@
  * omp dropped in 16.0.2 — see MEM006).
  */
 
+import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { streamSimple } from "@earendil-works/pi-ai";
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -52,23 +54,137 @@ import { cleanStream } from "./src/core/clean-stream";
 import { loadOverrides } from "./src/core/overrides";
 import { M3_COMPAT, M3_DEFAULTS, PROVIDERS, type ProviderSpec } from "./src/core/providers";
 
-// Pi forks exposing getAgentDir(); first one whose import succeeds wins.
-const AGENT_DIR_PROVIDERS = [
-	"@earendil-works/pi-coding-agent", // vanilla pi
-	"@oh-my-pi/pi-coding-agent", // omp (can1357/oh-my-pi)
-	"@gsd/pi-coding-agent", // gsd (open-gsd/gsd-pi)
-] as const;
+/** Three pi-family hosts this extension targets. Each one ships its own
+ *  copy of `getAgentDir()` from its bundled `@…/pi-coding-agent` package.
+ *  The strings are also dynamic `import()` specifiers — order matters.
+ *  Exported so the regression test in `tests/s06-resolve-agent-dir.mjs`
+ *  can read the package names without re-declaring them. */
+export const AGENT_DIR_PROVIDERS = {
+	pi: "@earendil-works/pi-coding-agent",
+	omp: "@oh-my-pi/pi-coding-agent",
+	gsd: "@gsd/pi-coding-agent",
+} as const;
 
-async function resolveAgentDir(): Promise<string | undefined> {
-	for (const pkg of AGENT_DIR_PROVIDERS) {
-		try {
-			const mod = await import(pkg);
-			if (typeof mod.getAgentDir === "function") return mod.getAgentDir();
-		} catch {
-			// Package not installed in this runtime — try the next one.
-		}
+export type Host = keyof typeof AGENT_DIR_PROVIDERS;
+
+/** Pure host detection. Self-contained (inlines the path-normalization
+ *  step) so the regression test can `eval` the function body in isolation
+ *  without dragging in module-level state. Cross-platform: Windows
+ *  argv[1] is `C:\…\node_modules\@opengsd\gsd-pi\dist\loader.js`, POSIX
+ *  is `/opt/homebrew/lib/node_modules/@opengsd/gsd-pi/dist/loader.js` —
+ *  both match the substring `@opengsd/gsd-pi` after normalization. */
+export function detectHost(
+	argv1: string | undefined,
+	bunVersion: string | undefined,
+): Host | undefined {
+	// omp is uniquely identified by running under Bun — nothing else in
+	// scope uses Bun, and omp's binary is Bun-compiled (MEM022).
+	if (typeof bunVersion === "string" && bunVersion.length > 0) return "omp";
+	const norm = String(argv1 ?? "").replace(/\\/g, "/").toLowerCase();
+	// Order matters: gsd's path also contains `pi-coding-agent` (the
+	// @gsd/pi-coding-agent re-export), so check the more specific gsd
+	// substring first to avoid a false positive on `pi`.
+	if (norm.includes("@opengsd/gsd-pi") || norm.includes("gsd-pi/dist/loader")) {
+		return "gsd";
+	}
+	if (
+		norm.includes("@earendil-works/pi-coding-agent") ||
+		norm.includes("pi-coding-agent/dist/cli")
+	) {
+		return "pi";
 	}
 	return undefined;
+}
+
+/** Expand a leading `~` or `~/` to the user's home directory. Mirrors the
+ *  POSIX-shell convention most users will reach for; we do not support
+ *  `~user/` syntax because that requires `/etc/passwd` lookup and is not
+ *  portable to Windows. */
+function expandHome(p: string): string {
+	if (p === "~") return homedir();
+	if (p.startsWith("~/") || p.startsWith("~\\")) return homedir() + p.slice(1);
+	return p;
+}
+
+/** Try one package specifier; return its `getAgentDir()` if it imports
+ *  cleanly and exposes the function, else `undefined`. */
+async function tryPackage(pkg: string): Promise<string | undefined> {
+	try {
+		const mod = await import(pkg);
+		if (typeof mod.getAgentDir === "function") return mod.getAgentDir();
+	} catch {
+		// Package not installed in this runtime — try the next one.
+	}
+	return undefined;
+}
+
+/** Order in which to probe `getAgentDir()` packages for a given host.
+ *  The matching host's package is tried first (it should be the source of
+ *  truth on a single-host install); vanilla pi is always second because
+ *  the legacy-pi-compat rewrite (MEM013) means `@earendil-works/pi-coding-agent`
+ *  is the resolved module under omp on most setups; the remaining host is
+ *  the last resort. Exported for the regression test; takes the providers
+ *  map as an argument (defaulting to the module constant) so the test can
+ *  inject a fixture without module-scope gymnastics. */
+export function probeOrder(
+	host: Host | undefined,
+	providers: typeof AGENT_DIR_PROVIDERS = AGENT_DIR_PROVIDERS,
+): readonly string[] {
+	if (host === "pi") {
+		return [providers.pi, providers.omp, providers.gsd];
+	}
+	if (host === "gsd") {
+		return [providers.gsd, providers.pi, providers.omp];
+	}
+	if (host === "omp") {
+		return [providers.omp, providers.pi, providers.gsd];
+	}
+	// No host detected — fall through to the legacy order (vanilla first,
+	// then the others). Single-host installs still work.
+	return [providers.pi, providers.omp, providers.gsd];
+}
+
+async function resolveAgentDir(): Promise<string | undefined> {
+	// Priority 1: explicit user/test override. Validated for existence so
+	// a stale value pointing at a deleted dir falls through to detection
+	// rather than silently masking override-file loading.
+	const override = process.env.M3_CLEAN_AGENT_DIR;
+	if (override && override.length > 0) {
+		const expanded = expandHome(override);
+		try {
+			const st = await stat(expanded);
+			if (st.isDirectory()) {
+				debugAgentDir("override", expanded);
+				return expanded;
+			}
+		} catch {
+			// Override dir missing or unreadable — log and fall through.
+			console.debug(
+				`[m3-clean] M3_CLEAN_AGENT_DIR=${override} is not a readable directory; falling through to host detection`,
+			);
+		}
+	}
+
+	// Priority 2: host detection (bun runtime fingerprint + argv[1] substring).
+	const host = detectHost(process.argv[1], process.versions.bun);
+
+	// Priority 3: per-host package probe, matching package first.
+	for (const pkg of probeOrder(host)) {
+		const dir = await tryPackage(pkg);
+		if (dir) {
+			debugAgentDir(host ?? "unknown", dir);
+			return dir;
+		}
+	}
+	debugAgentDir(host ?? "unknown", undefined);
+	return undefined;
+}
+
+/** One-line diagnostic of the resolved agent dir. `console.debug` is the
+ *  right tier: silent under default Node/Bun, visible if the user
+ *  redirects stderr (`node ... 2>debug.log` or `DEBUG=*`). */
+function debugAgentDir(host: string | "unknown", agentDir: string | undefined): void {
+	console.debug(`[m3-clean] host=${host} agentDir=${agentDir ?? "<undefined>"}`);
 }
 
 function makeProvider(
