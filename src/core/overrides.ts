@@ -79,13 +79,14 @@ export async function loadOverrides(
 			if (
 				typeof override.contextWindow !== "number" ||
 				!Number.isFinite(override.contextWindow) ||
-				override.contextWindow <= 0
+				override.contextWindow <= 0 ||
+				!Number.isInteger(override.contextWindow)
 			) {
 				result.invalid.push({
 					provider,
 					modelId,
 					field: "contextWindow",
-					reason: `expected positive number, got ${JSON.stringify(override.contextWindow)}`,
+					reason: `expected positive integer, got ${JSON.stringify(override.contextWindow)}`,
 				});
 				continue;
 			}
