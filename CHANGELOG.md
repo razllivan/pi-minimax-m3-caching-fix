@@ -5,6 +5,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wrapper-level `compat: M3_COMPAT` pass-through in `streamSimple`
+  bridge (MEM017 runtime half — MEM024 / MEM025).** The
+  `makeProvider` wrapper in `index.ts` now spreads
+  `compat: M3_COMPAT` into the object passed to the top-level
+  `streamSimple` bridge, so omp's openai-completions driver actually
+  receives `model.compat.streamIdleTimeoutMs: 30_000` at runtime.
+  Without this, `buildCompat` writes `compat: undefined` and omp
+  crashes on the first packet with "undefined is not an object
+  (evaluating 'model.compat.streamIdleTimeoutMs')". This is the
+  runtime half of MEM017; the source half — adding
+  `streamIdleTimeoutMs: 30_000` to `M3_COMPAT` itself — shipped in the
+  previous Unreleased entry. S04 T04 evidence record `150700a3`, S05
+  T01 evidence record `745198ad`. After this: the registered
+  `minimax-m3-clean / MiniMax-M3` provider streams a real turn on omp
+  with `cacheRead` metrics, no fallback to the built-in
+  `minimax-code / MiniMax-M3` needed.
+
+### Fixed
+
+- **Added `streamIdleTimeoutMs: 30_000` to `M3_COMPAT` (MEM017).** omp
+  16.0.2's openai-completions driver enforces
+  `model.compat.streamIdleTimeoutMs` and previously errored with
+  "undefined is not an object" on the first request when the field was
+  missing (S04 T04 evidence record 150700a3). Vanilla
+  `@earendil-works/pi-ai@0.79.1` ignores the field, so this is a safe
+  additive change for vanilla pi users. Replaces the S04 T04 fallback
+  to the built-in `minimax-code/MiniMax-M3` provider on omp: the
+  registered `minimax-m3-clean` provider now streams a real turn on omp
+  with `cacheRead` metrics, no fallback needed.
+
+### Changed
+
+- **Modularized core logic.** The 640-line `index.ts` is split into four
+  files: `index.ts` (orchestrator — agent-dir discovery, `makeProvider`,
+  default-export factory), `src/core/providers.ts` (pure-constant provider
+  metadata: `M3_COMPAT`, `M3_DEFAULTS`, `PROVIDERS`, `ProviderSpec`),
+  `src/core/overrides.ts` (`m3-clean-overrides.json` parser and types),
+  and `src/core/clean-stream.ts` (`ThinkScanner` and the `cleanStream`
+  stream wrapper). No behavior change — the registered providers, the
+  stream wrapper semantics, and the override-file format are identical.
+  `package.json` `files` whitelist now includes `src/**/*.ts` so the new
+  files ship in the published tarball.
+- **omp install path is now functional.** Replaced
+  `getApiProvider("openai-completions").streamSimple` with the
+  top-level `streamSimple<TApi>(model, ctx, opts)` function (exists on
+  vanilla `@earendil-works/pi-ai@0.79.1`, gsd-pi's `@gsd/pi-ai`
+  symlink, and omp's `@oh-my-pi/pi-ai@16.0.2`). Replaced
+  `createAssistantMessageEventStream()` factory call with
+  `new AssistantMessageEventStream()` (same cross-host coverage).
+  Dropped the defensive 'openai-completions driver not registered'
+  warning path. Both the omp `models` listing and a real omp
+  streaming turn now exercise the extension end-to-end.
+
 ### Added
 
 - **Tunable `contextWindow` via `m3-clean-overrides.json`.** The extension
@@ -19,6 +74,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   Invalid `contextWindow` values (non-positive or non-numeric) are
   reported via a TUI notification at `session_start` and the field falls
   back to the default.
+- **Multi-host peer pins for `omp`.** `package.json` declares
+  `peerDependencies` and `devDependencies` for
+  `@oh-my-pi/pi-coding-agent@16.0.2` and `@oh-my-pi/pi-ai@16.0.2`
+  alongside the existing vanilla-pi pins. Both pins are surfaced to
+  consumers as a `peerDependencies` warning on install when the user's
+  installed version differs — the warning is the intended signal, not
+  a configuration mistake. The full per-host contract is documented in
+  `AGENTS.md` under "Multi-host support".
+- **Runtime compatibility with `gsd-pi`.** The extension is also
+  supported on the gsd fork (shipped as `gsd-pi` on npm). It is not
+  pinned in `package.json` because its internal package name
+  (`@gsd/pi-coding-agent`) is not published to the npm registry —
+  `npm view @gsd/pi-coding-agent` returns 404. gsd-pi's loader injects
+  `@gsd/pi-coding-agent` into the module path at runtime, so the
+  extension's existing `resolveAgentDir` fallback chain still finds a
+  match on a host running gsd-pi. This is documented as a known-
+  compatible fork in `AGENTS.md`; declaring it in `package.json` is
+  impossible (a peer pin would fail `pnpm install` with 404).
+- **Fail-soft provider registration.** `index.ts` resolves the
+  `openai-completions` driver once at extension load and wraps every
+  `pi.registerProvider` call in a try/catch. A missing driver
+  (`getApiProvider("openai-completions")` returns `undefined`) and a
+  `registerProvider` validation throw both record a TUI warning that
+  surfaces at `session_start` and skip the affected provider(s)
+  instead of letting the exception propagate and crash the session.
 
 ## [0.2.0] - 2026-06-12
 

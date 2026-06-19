@@ -79,15 +79,173 @@ with open('PATH/TO/SESSION.jsonl') as f:
 
 Healthy numbers: turn 1 `input ~ 9000, cacheRead ~ 100`. Turn 2+ `input ~ 100, cacheRead ~ 9000+`.
 
+### Install cycle verification
+
+The S07 slice added three per-host install-cycle shell scripts that automate the manual `pi install -l ./` → turn → session-log → `pi remove -l ./` flow documented above. They assert the session log file lands at the host-correct path (`~/.pi/agent/sessions/`, `~/.gsd/agent/sessions/`, or `~/.omp/agent/sessions/`), covering the macOS `/tmp` → `/private/tmp` symlink precedent.
+
+| Host        | Script                                              |
+| ----------- | --------------------------------------------------- |
+| vanilla pi  | `.gsd/milestones/M001/slices/S07/tasks/T01-pi-install-cycle.sh` |
+| omp         | `.gsd/milestones/M001/slices/S07/tasks/T01-omp-install-cycle.sh` |
+| gsd         | `.gsd/milestones/M001/slices/S07/tasks/T01-gsd-install-cycle.sh` |
+
+Run an individual script directly (`bash T01-pi-install-cycle.sh`) for ad-hoc UAT, or run the regression check to verify all three scripts are present and syntactically valid:
+
+```bash
+node tests/s07-install-cycle-check.mjs
+```
+
+The regression check is hermetic (Node 18+ stdlib only, MEM020 pattern) and exits 0 only when all three scripts exist, pass `bash -n`, and AGENTS.md still references them by filename — protecting against accidental script removal.
+
+## Multi-host support
+
+The extension targets three pi-family hosts. Each one discovers the
+extension through its own loader and resolves `getAgentDir()` /
+`getApiProvider` from its own bundled `@…/pi-coding-agent` and
+`@…/pi-ai` packages. Per-host paths and peer pins are documented in
+the subsections below; the runtime contract for each host is the
+source of truth for the matching peer/dev pin in `package.json`.
+
+### Override-file path per host
+
+The active agent config directory is resolved dynamically by importing
+`getAgentDir()` from whichever `@…/pi-coding-agent` package the host
+exposes, with a silent fallback to defaults if none is installed. The
+override file (`m3-clean-overrides.json`) lives in the per-host
+agent dir:
+
+| Pi fork        | Path                                   |
+| -------------- | -------------------------------------- |
+| vanilla pi     | `~/.pi/agent/m3-clean-overrides.json`  |
+| omp            | `~/.omp/agent/m3-clean-overrides.json` |
+| gsd            | `~/.gsd/agent/m3-clean-overrides.json` |
+
+This mirrors the README's "Tuning context window" table — see that
+section for the override-file schema and the "first valid
+`contextWindow` wins" rule.
+
+#### Multi-host install: S06 fix (MEM018)
+
+Before S06, `resolveAgentDir()` probed `@earendil-works/pi-coding-agent`
+first, then the omp and gsd packages. On a **multi-host dev machine**
+(all three pi-family packages present in `node_modules/`, e.g. an
+extension author who tests against all three hosts), the probe order
+mattered: if `PI_PACKAGE_DIR` was set globally (gsd-pi's loader sets
+`PI_PACKAGE_DIR=…/@opengsd/gsd-pi/pkg` to inject its own package
+resolution), the vanilla `@earendil-works/pi-coding-agent.getAgentDir()`
+returned `~/.gsd/agent` even when the active host was `pi` or `omp`.
+This is the MEM011 / MEM018 collision — the `getAgentDir()` call alone
+cannot disambiguate the active host on a contaminated `node_modules/`
+setup, so all three hosts would end up reading `~/.gsd/agent` (or
+whichever dir the env-var shuffle resolved first). User override
+files in the correct `~/.pi/agent/` or `~/.omp/agent/` directory
+were silently ignored.
+
+S06 closed this with a host-aware priority chain in `resolveAgentDir()`:
+
+1. **`M3_CLEAN_AGENT_DIR` env override** — validated for existence;
+   if the dir is missing, log a debug-level warning and fall through.
+2. **Host detection** — `process.versions.bun` (omp's runtime
+   fingerprint) first, then a normalized `process.argv[1]` substring
+   match (`@opengsd/gsd-pi` or `gsd-pi/dist/loader` → gsd;
+   `@earendil-works/pi-coding-agent` or `pi-coding-agent/dist/cli` →
+   vanilla pi). The gsd check is intentionally placed before the pi
+   check because gsd's path also contains `pi-coding-agent` (the
+   `@gsd/pi-coding-agent` re-export sits under that directory).
+3. **Per-host package-probe order** — the matching host's package is
+   tried first, then vanilla pi (the legacy-pi-compat rewrite for omp
+   per MEM013 means vanilla is often the resolved module under omp),
+   then the remaining host as last resort.
+4. **Legacy order** — only reached if no host is detectable
+   (future rebranded host). Same order as the pre-S06 behavior, so
+   single-host installs are unaffected.
+
+A `console.debug` line at extension-load time logs
+`[m3-clean] host=<host> agentDir=<path>`, so users can diagnose
+cross-contamination by redirecting stderr (`2>debug.log`). The
+priority-1 override is exposed as `host=override` in the log so
+test escape hatches are visible. `tests/s06-resolve-agent-dir.mjs`
+regression check covers the argv-matching logic.
+
+### Peer pin per host
+
+`package.json` declares `peerDependencies` and `devDependencies` for
+two of the three hosts. The peer pin is what surfaces a warning to
+consumers on install when their installed version differs from the
+pinned one — that warning is the intended signal; version drift is
+loud rather than silent.
+
+| Pi fork        | Peer pin                                                |
+| -------------- | ------------------------------------------------------- |
+| vanilla pi     | `@earendil-works/pi-{ai,coding-agent}@0.79.1`           |
+| omp            | `@oh-my-pi/pi-{ai,coding-agent}@16.0.2`                 |
+| gsd            | _runtime compatibility only — no peer pin (see below)_  |
+
+### gsd has no peer pin on purpose
+
+`gsd-pi` (the published npm package) ships the internal package name
+`@gsd/pi-coding-agent`, which is **not** published to the npm
+registry — `npm view @gsd/pi-coding-agent` returns 404. A
+`peerDependencies` entry of `@gsd/pi-coding-agent` in our
+`package.json` would therefore break `pnpm install` for the gsd
+install path. gsd-pi's `dist/loader.js` prepends its own
+`node_modules/` to `NODE_PATH` at runtime, which injects
+`@gsd/pi-coding-agent` into the module resolution path; that is why
+the extension's `resolveAgentDir` fallback chain still finds a match
+on a host running gsd-pi (it falls through to `@gsd/pi-coding-agent`
+when neither the vanilla nor the omp package is installed).
+Documenting the runtime contract here and in `README.md` is the right
+surface for gsd compatibility; declaring it in `package.json` is
+impossible.
+
+### omp install path is now functional (S04)
+
+S04 closed the static-import gap (see MEM006 + MEM013). The previous
+`index.ts` did a static `import { getApiProvider } from "@earendil-works/pi-ai"`
+and called `getApiProvider("openai-completions").streamSimple(...)`.
+omp's `@oh-my-pi/pi-ai@16.0.2` does **not** export `getApiProvider` —
+it exposes `getCustomApi` / `registerCustomApi` instead — so the
+static import would have crashed the extension load on omp.
+
+S04 replaced both host-fragile symbols with cross-host bridges that
+exist on all three Pi forks:
+
+- `getApiProvider("openai-completions").streamSimple(...)` →
+  top-level `streamSimple<TApi>(model, ctx, opts)`. The wrapper now
+  passes `{ ...model, api: "openai-completions" }` to the top-level
+  function, which dispatches to the built-in driver for that api
+  without going through `getApiProvider`.
+- `createAssistantMessageEventStream()` (used inside the `cleanStream`
+  factory) → `new AssistantMessageEventStream()`. The cross-host
+  class constructor exists on all three `@…/pi-ai` versions.
+
+The defensive "openai-completions driver not registered" warning
+path (the `if (!driver) throw` guard around the imported
+`getApiProvider` result) is also gone — if a host's top-level
+`streamSimple` cannot handle the `openai-completions` api, the
+underlying driver call now errors at runtime, which is the right
+surface for that failure. After S04: `pi --list-models` on omp shows
+both `minimax-m3-clean` and `minimax-cn-m3-clean`, and a real
+streaming turn on omp produces a session log entry with `cacheRead`
+metrics.
+
+### Fail-soft behavior (S02)
+
+The orchestrator does not crash the whole session when this extension
+loads on a host that refuses to accept a provider name conflict in
+`pi.registerProvider(spec.name, ...)` (validation error throws). In
+that case the call is wrapped in try/catch; on throw the affected
+provider is skipped and a TUI warning naming the provider is
+deferred to `session_start` — no exception propagates out of the
+extension factory. Warnings are deferred to `session_start` because
+`ctx.ui.notify` is not available in the extension factory — the
+same precedent the override-file validation errors use.
+
 ## Critical learnings
 
 ### 1. The user's installed `pi-ai@0.79.1` does NOT have `compat.skipThinkingBlock`
 
-The upstream fix `pi-mono@b85b91c9` adds it; the published npm version 0.79.1 predates that commit. **Do not** set `compat.skipThinkingBlock: true` in `registerProvider` — the field doesn't exist in the type, tsc will fail. Either:
-- (chosen) strip thinking via a `message_end` hook at end-of-stream, or
-- cast `compat` to bypass tsc and accept that the field is ignored at runtime
-
-The original reasoning for the `message_end` approach (brief visual flash during streaming; session log stays clean) is summarized inline in `index.ts`'s file header.
+The upstream fix `pi-mono@b85b91c9` adds it; the published npm version 0.79.1 predates that commit. **Do not** set `compat.skipThinkingBlock: true` in `registerProvider` — the field doesn't exist in the type, tsc will fail. The post-0.1.0 code path strips thinking in flight (see §4 below) and never touches `compat.skipThinkingBlock`. If the upstream field does land in a future `@earendil-works/pi-ai`, do not enable it here without first removing the in-flight `cleanStream` wrapper — the two paths are not safe to combine.
 
 ### 2. `pi.registerProvider(name, { models })` REPLACES all models for that provider
 
@@ -97,11 +255,19 @@ Overriding the built-in `minimax` provider would wipe M2.x. Use distinct names (
 
 `ModelRegistry.hasConfiguredAuth()` checks `isConfigValueConfigured(providerApiKey)`. If the env var referenced by `$MINIMAX_CN_API_KEY` is unset, the `minimax-cn-m3-cache-fixed` provider is silently dropped from `pi --list-models`. This is intentional; users without CN auth don't see the CN option. To verify both providers, set both env vars (or set `MINIMAX_CN_API_KEY=dummy` for testing).
 
-### 4. `message_end` can replace the final message but `message_update` cannot
+### 4. `message_end` is no longer used — `cleanStream` wraps the openai-completions stream in flight
 
-The agent emits `message_update` for each streaming delta; the event is observable but read-only — the extension cannot mutate the streaming display. `message_end` returns `MessageEndEventResult` with an optional `message` field; if returned, the agent replaces the final message in place via `_replaceMessageInPlace`. The replacement must keep the original message role.
-
-Upstream's `skipThinkingBlock` strips markers on `message_update` (cleaner live display). Our hook only cleans at `message_end` — there's a brief visual flash of `<think>…</think>` during streaming before the hook replaces the final message.
+0.2.0 reworked the cleanup strategy from post-hoc to in-flight. The
+`cleanStream` wrapper in `src/core/clean-stream.ts` wraps the built-in
+`openai-completions` driver and rewrites the event stream in real
+time via the `ThinkScanner`: duplicated thinking from M3's
+`reasoning_content` / `reasoning` alternation is suppressed, and
+`<think>…</think>` spans are filtered out of text deltas (with their
+inner content routed to a real thinking block when no reasoning
+fields are streamed). The `message_end` hook that 0.1.0 used for the
+post-hoc strip is no longer registered — in 0.2.0+ the live display
+is clean by the time the assistant message finishes streaming, and
+no end-of-turn mutation is needed.
 
 ### 5. `registerProvider` accepts `$ENV_VAR` syntax for `apiKey`
 

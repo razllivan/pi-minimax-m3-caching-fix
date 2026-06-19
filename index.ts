@@ -2,603 +2,224 @@
  * minimax-m3-clean — MiniMax-M3 on the OpenAI-compatible endpoint with
  * clean streaming output.
  *
- * Why this exists
- * ---------------
  * pi 0.79.1 routes the built-in `minimax / MiniMax-M3` to the Anthropic-
- * compatible endpoint, which silently ignores `cache_control` (full input
- * price every turn). The OpenAI-compatible endpoint (`/v1/chat/completions`)
- * does passive caching — but there M3 has two streaming quirks:
+ * compatible endpoint, which silently ignores `cache_control` (full
+ * input price every turn). The OpenAI-compatible endpoint
+ * (`/v1/chat/completions`) does passive caching — but M3 emits thinking
+ * twice there: in `reasoning_content`/`reasoning` fields (consumed as
+ * proper thinking blocks) and again inline in `content` as
+ * `<think>…</think>`. It also alternates between the two reasoning
+ * fields across chunks, which the openai-completions driver treats as
+ * new blocks and re-streams from the start.
  *
- *   1. It emits thinking twice: in `reasoning_content`/`reasoning` fields
- *      (consumed by pi as thinking blocks) and again inline in `content` as
- *      `<think>…</think>`, which pollutes the visible text.
- *   2. It alternates between `reasoning_content` and `reasoning` across
- *      chunks. pi-ai's openai-completions driver starts a NEW thinking block
- *      whenever the field (signature) changes, producing a truncated orphan
- *      thinking block followed by a second block that re-streams the
- *      reasoning from the start.
+ * The upstream fix (earendil-works/pi-mono b85b91c9, `skipThinkingBlock`)
+ * is unreleased as of 0.79.1. This extension routes to the OpenAI-
+ * compatible endpoint and rewrites the event stream in flight. The
+ * stream wrapper is in `./src/core/clean-stream.ts`; the override-file
+ * parser in `./src/core/overrides.ts`; the provider metadata in
+ * `./src/core/providers.ts`. This file is the orchestrator: discovers
+ * the agent dir, loads overrides, and registers the two providers.
  *
- * The upstream fix (earendil-works/pi commit b85b91c9, `skipThinkingBlock`)
- * is not merged/released as of 0.79.1, and the community extension
- * `rwese/pi-minimax-m3-caching-fix` only strips the `<think>` duplicate at
- * `message_end`, after it was visible during the whole stream.
+ * Fail-soft behavior (S02)
+ * ------------------------
+ * The orchestrator must not crash the whole session when this extension
+ * loads on a host that refuses to accept a provider name conflict in
+ * `pi.registerProvider(spec.name, ...)` (validation error throws). Each
+ * `pi.registerProvider` call is wrapped in try/catch; on throw we record
+ * a TUI warning naming the provider and continue with the next spec
+ * instead of letting the exception propagate.
  *
- * This extension fixes both at the stream level: it registers providers
- * whose `streamSimple` delegates to the built-in openai-completions driver
- * and rewrites the event stream in flight:
+ * Warnings are deferred to `session_start` because `ctx.ui.notify` is
+ * not available in the extension factory — the same precedent S01
+ * established for `overrides.invalid` entries.
  *
- *   - All driver thinking blocks are merged into ONE thinking block.
- *     Re-streamed duplicate content (prefix overlap) is suppressed; only
- *     genuinely new reasoning is emitted.
- *   - `<think>…</think>` spans are filtered out of text deltas in real time
- *     (handles markers split across deltas). If the model never streamed
- *     reasoning fields, the `<think>` content is re-routed into a real
- *     thinking block instead of being dropped.
- *   - Visible text starts only at its first non-whitespace character, so no
- *     empty/whitespace text blocks are rendered.
- *   - Tool calls, usage, and stop reasons pass through untouched.
+ * Top-level `streamSimple` bridge
+ * -------------------------------
+ * `streamSimple<TApi>(model, ctx, opts)` exists as a top-level export on
+ * all three Pi-family hosts (vanilla `@earendil-works/pi-ai@0.79.1`,
+ * gsd-pi's `@gsd/pi-ai` symlink facade, omp's `@oh-my-pi/pi-ai@16.0.2`).
+ * It dispatches to the built-in driver for `model.api`; the wrapper
+ * passes `{...model, api: "openai-completions", compat: M3_COMPAT}` to
+ * reach the openai-completions driver without going through
+ * `getApiProvider` (which omp dropped in 16.0.2 — see MEM006).
  *
- * Removal: when a pi release ships MiniMax-M3 on `openai-completions` with
- * `skipThinkingBlock` (upstream b85b91c9), delete this file and switch back
- * to the built-in `minimax / MiniMax-M3` via /model.
+ * The explicit `compat: M3_COMPAT` in the spread is structural, not
+ * cosmetic: `pi.registerProvider` accepts a `compat` config and the
+ * model's `compat` is set at registration time, but `buildCompat` (in
+ * the host pi-ai) writes `compat: undefined` when the registered value
+ * is not recognized as a known compat. omp's openai-completions driver
+ * dereferences `model.compat.streamIdleTimeoutMs` on the first packet
+ * and crashes with "undefined is not an object" when the field is
+ * missing (S04 T04 evidence record 150700a3, S05 T01 evidence record
+ * 745198ad). Re-passing the canonical `M3_COMPAT` object here — instead
+ * of relying on whatever the registration path produced — guarantees
+ * the value the wrapper actually receives is the value the driver
+ * reads. This is the runtime half of MEM017 (MEM024 / MEM025); the
+ * source half (declaring `streamIdleTimeoutMs` on M3_COMPAT) shipped
+ * in S05.
  */
 
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import type {
-	Api,
-	AssistantMessage,
-	AssistantMessageEventStream,
-	Context,
-	Model,
-	SimpleStreamOptions,
-	TextContent,
-	ThinkingContent,
-} from "@earendil-works/pi-ai";
-import {
-	createAssistantMessageEventStream,
-	getApiProvider,
-} from "@earendil-works/pi-ai";
+import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { streamSimple } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const OPEN_TAG = "<think>";
-const CLOSE_TAG = "</think>";
+import { cleanStream } from "./src/core/clean-stream";
+import { loadOverrides } from "./src/core/overrides";
+import { M3_COMPAT, M3_DEFAULTS, PROVIDERS, type ProviderSpec } from "./src/core/providers";
 
-/**
- * Incremental scanner that splits a text stream into visible text and
- * `<think>…</think>` inner content. Tags split across deltas are held back
- * until they can be classified.
- */
-class ThinkScanner {
-	private buf = "";
-	private inThink = false;
-
-	feed(chunk: string): { text: string; think: string } {
-		let text = "";
-		let think = "";
-		const s = this.buf + chunk;
-		this.buf = "";
-		let i = 0;
-		while (i < s.length) {
-			const tag = this.inThink ? CLOSE_TAG : OPEN_TAG;
-			const idx = s.indexOf(tag, i);
-			if (idx !== -1) {
-				const piece = s.slice(i, idx);
-				if (this.inThink) think += piece;
-				else text += piece;
-				this.inThink = !this.inThink;
-				i = idx + tag.length;
-			} else {
-				const keep = partialTagSuffix(s, i, tag);
-				const piece = s.slice(i, s.length - keep);
-				if (this.inThink) think += piece;
-				else text += piece;
-				this.buf = s.slice(s.length - keep);
-				i = s.length;
-			}
-		}
-		return { text, think };
-	}
-
-	/** Flush held-back bytes at end of block. An unterminated `<think>` stays thinking. */
-	flush(): { text: string; think: string } {
-		const rest = this.buf;
-		this.buf = "";
-		if (!rest) return { text: "", think: "" };
-		return this.inThink ? { text: "", think: rest } : { text: rest, think: "" };
-	}
-}
-
-/** Longest k < tag.length such that s (from `from`) ends with tag.slice(0, k). */
-function partialTagSuffix(s: string, from: number, tag: string): number {
-	const max = Math.min(tag.length - 1, s.length - from);
-	for (let k = max; k > 0; k--) {
-		if (s.endsWith(tag.slice(0, k))) return k;
-	}
-	return 0;
-}
-
-interface TextState {
-	scanner: ThinkScanner;
-	started: boolean;
-	index: number;
-	block: TextContent;
-}
-
-interface ThinkingSegment {
-	block: ThinkingContent;
-	index: number;
-	open: boolean;
-	/** Leading-whitespace-trimmed accumulated thinking text (what was emitted). */
-	text: string;
-	signature?: string;
-}
-
-/**
- * Wrap the built-in openai-completions stream, rewriting events so that
- * `<think>` content never reaches a visible text block and duplicated /
- * re-streamed reasoning collapses into a single thinking block.
- */
-function cleanStream(
-	base: AssistantMessageEventStream,
-): AssistantMessageEventStream {
-	const out = createAssistantMessageEventStream();
-
-	void (async () => {
-		let output: AssistantMessage | undefined;
-		const toolIndexMap = new Map<number, number>();
-		const textStates = new Map<number, TextState>();
-		/** Accumulated text per base thinking block, for prefix dedupe. */
-		const baseThinkingAccs = new Map<number, string>();
-		let sawBaseThinking = false;
-		let segment: ThinkingSegment | undefined;
-
-		const ensureOutput = (partial: AssistantMessage): AssistantMessage => {
-			if (!output) output = { ...partial, content: [] };
-			return output;
-		};
-
-		// The base driver mutates its partial in place; mirror everything but
-		// content (usage, stopReason, responseId, …) onto our partial.
-		const syncMeta = (partial: AssistantMessage) => {
-			if (!output) {
-				ensureOutput(partial);
-				return;
-			}
-			for (const key of Object.keys(partial)) {
-				if (key === "content") continue;
-				(output as unknown as Record<string, unknown>)[key] = (
-					partial as unknown as Record<string, unknown>
-				)[key];
-			}
-		};
-
-		const ensureSegment = (): ThinkingSegment => {
-			if (segment?.open) return segment;
-			const block: ThinkingContent = { type: "thinking", thinking: "" };
-			output!.content.push(block);
-			segment = {
-				block,
-				index: output!.content.length - 1,
-				open: true,
-				text: "",
-			};
-			baseThinkingAccs.clear();
-			out.push({
-				type: "thinking_start",
-				contentIndex: segment.index,
-				partial: output!,
-			});
-			return segment;
-		};
-
-		const closeSegment = () => {
-			if (!segment?.open) return;
-			segment.open = false;
-			segment.text = segment.text.trimEnd();
-			segment.block.thinking = segment.text;
-			if (segment.signature) {
-				(
-					segment.block as ThinkingContent & { thinkingSignature?: string }
-				).thinkingSignature = segment.signature;
-			}
-			out.push({
-				type: "thinking_end",
-				contentIndex: segment.index,
-				content: segment.text,
-				partial: output!,
-			});
-		};
-
-		/** Append already-deduped thinking text to the current segment. */
-		const appendThinking = (delta: string) => {
-			if (!delta || !output) return;
-			const seg = ensureSegment();
-			if (seg.text === "") {
-				delta = delta.replace(/^\s+/, "");
-				if (!delta) return;
-			}
-			seg.text += delta;
-			seg.block.thinking = seg.text;
-			out.push({
-				type: "thinking_delta",
-				contentIndex: seg.index,
-				delta,
-				partial: output,
-			});
-		};
-
-		/**
-		 * Thinking from a base thinking block. M3 re-streams the same
-		 * reasoning when the driver switches reasoning fields, so emit only
-		 * the part that extends what the current segment already holds.
-		 */
-		const pushBaseThinking = (contentIndex: number, delta: string) => {
-			const acc = (baseThinkingAccs.get(contentIndex) ?? "") + delta;
-			baseThinkingAccs.set(contentIndex, acc);
-			const seg = segment?.open ? segment : undefined;
-			const have = seg?.text ?? "";
-			const norm = acc.replace(/^\s+/, "");
-			if (norm.length <= have.length) {
-				// Duplicate prefix of what we already emitted → suppress.
-				if (have.startsWith(norm)) return;
-				appendThinking(delta);
-			} else if (norm.startsWith(have)) {
-				appendThinking(norm.slice(have.length));
-			} else {
-				appendThinking(delta);
-			}
-		};
-
-		/** Thinking recovered from inline `<think>…</think>` markers. */
-		const pushInlineThinking = (think: string) => {
-			// If the model streams real reasoning fields, the <think> copy is a
-			// duplicate — drop it.
-			if (!think || sawBaseThinking || !output) return;
-			appendThinking(think);
-		};
-
-		const pushText = (state: TextState, text: string) => {
-			if (!text || !output) return;
-			if (!state.started) {
-				text = text.replace(/^\s+/, "");
-				if (!text) return;
-				closeSegment();
-				output.content.push(state.block);
-				state.index = output.content.length - 1;
-				state.started = true;
-				out.push({
-					type: "text_start",
-					contentIndex: state.index,
-					partial: output,
-				});
-			}
-			state.block.text += text;
-			out.push({
-				type: "text_delta",
-				contentIndex: state.index,
-				delta: text,
-				partial: output,
-			});
-		};
-
-		try {
-			for await (const ev of base) {
-				switch (ev.type) {
-					case "start": {
-						ensureOutput(ev.partial);
-						out.push({ type: "start", partial: output! });
-						break;
-					}
-					case "thinking_start": {
-						sawBaseThinking = true;
-						syncMeta(ev.partial);
-						baseThinkingAccs.set(ev.contentIndex, "");
-						break;
-					}
-					case "thinking_delta": {
-						syncMeta(ev.partial);
-						pushBaseThinking(ev.contentIndex, ev.delta);
-						break;
-					}
-					case "thinking_end": {
-						syncMeta(ev.partial);
-						// Don't close the merged segment: the driver may open a
-						// follow-up block that continues the same reasoning. Just
-						// remember the signature for the final block.
-						const baseBlock = ev.partial.content[ev.contentIndex] as
-							| (ThinkingContent & { thinkingSignature?: string })
-							| undefined;
-						if (
-							segment &&
-							baseBlock?.type === "thinking" &&
-							baseBlock.thinkingSignature
-						) {
-							segment.signature = baseBlock.thinkingSignature;
-						}
-						break;
-					}
-					case "text_start": {
-						syncMeta(ev.partial);
-						// Don't emit yet: the block may turn out to be pure <think>
-						// content. text_start fires on the first visible character.
-						textStates.set(ev.contentIndex, {
-							scanner: new ThinkScanner(),
-							started: false,
-							index: -1,
-							block: { type: "text", text: "" },
-						});
-						break;
-					}
-					case "text_delta": {
-						syncMeta(ev.partial);
-						const state = textStates.get(ev.contentIndex);
-						if (!state) break;
-						const { text, think } = state.scanner.feed(ev.delta);
-						pushInlineThinking(think);
-						pushText(state, text);
-						break;
-					}
-					case "text_end": {
-						syncMeta(ev.partial);
-						const state = textStates.get(ev.contentIndex);
-						if (!state) break;
-						const tail = state.scanner.flush();
-						pushInlineThinking(tail.think);
-						pushText(state, tail.text);
-						if (state.started) {
-							state.block.text = state.block.text.trimEnd();
-							out.push({
-								type: "text_end",
-								contentIndex: state.index,
-								content: state.block.text,
-								partial: output!,
-							});
-						}
-						break;
-					}
-					case "toolcall_start": {
-						syncMeta(ev.partial);
-						closeSegment();
-						const baseBlock = ev.partial.content[ev.contentIndex];
-						output!.content.push(
-							baseBlock as AssistantMessage["content"][number],
-						);
-						toolIndexMap.set(ev.contentIndex, output!.content.length - 1);
-						out.push({
-							type: "toolcall_start",
-							contentIndex: toolIndexMap.get(ev.contentIndex)!,
-							partial: output!,
-						});
-						break;
-					}
-					case "toolcall_delta": {
-						syncMeta(ev.partial);
-						const idx = toolIndexMap.get(ev.contentIndex);
-						if (idx === undefined) break;
-						out.push({
-							type: "toolcall_delta",
-							contentIndex: idx,
-							delta: ev.delta,
-							partial: output!,
-						});
-						break;
-					}
-					case "toolcall_end": {
-						syncMeta(ev.partial);
-						const idx = toolIndexMap.get(ev.contentIndex);
-						if (idx === undefined) break;
-						output!.content[idx] = ev.toolCall;
-						out.push({
-							type: "toolcall_end",
-							contentIndex: idx,
-							toolCall: ev.toolCall,
-							partial: output!,
-						});
-						break;
-					}
-					case "done": {
-						closeSegment();
-						const message: AssistantMessage = {
-							...ev.message,
-							content: output ? output.content : ev.message.content,
-						};
-						out.push({ type: "done", reason: ev.reason, message });
-						break;
-					}
-					case "error": {
-						closeSegment();
-						const error: AssistantMessage = {
-							...ev.error,
-							content: output ? output.content : ev.error.content,
-						};
-						out.push({ type: "error", reason: ev.reason, error });
-						break;
-					}
-				}
-			}
-		} catch (e) {
-			const errorMessage = e instanceof Error ? e.message : String(e);
-			const fallback: AssistantMessage = output ?? {
-				role: "assistant",
-				content: [],
-				api: "openai-completions",
-				provider: "minimax-m3-clean",
-				model: "MiniMax-M3",
-				usage: {} as AssistantMessage["usage"],
-				stopReason: "error",
-				timestamp: Date.now(),
-			};
-			out.push({
-				type: "error",
-				reason: "error",
-				error: { ...fallback, stopReason: "error", errorMessage },
-			});
-		}
-	})();
-
-	return out;
-}
-
-const M3_COMPAT = {
-	supportsStore: false,
-	supportsDeveloperRole: false,
-	supportsReasoningEffort: false,
-	maxTokensField: "max_tokens" as const,
-};
-
-/** Built-in defaults. Used when `m3-clean-overrides.json` is missing or a
- *  field is not present in it. */
-const M3_DEFAULTS = {
-	contextWindow: 1_000_000,
-	maxTokens: 512_000,
-	cost: { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
+/** Three pi-family hosts this extension targets. Each one ships its own
+ *  copy of `getAgentDir()` from its bundled `@…/pi-coding-agent` package.
+ *  The strings are also dynamic `import()` specifiers — order matters.
+ *  Exported so the regression test in `tests/s06-resolve-agent-dir.mjs`
+ *  can read the package names without re-declaring them. */
+export const AGENT_DIR_PROVIDERS = {
+	pi: "@earendil-works/pi-coding-agent",
+	omp: "@oh-my-pi/pi-coding-agent",
+	gsd: "@gsd/pi-coding-agent",
 } as const;
 
-const OVERRIDES_FILE = "m3-clean-overrides.json";
+export type Host = keyof typeof AGENT_DIR_PROVIDERS;
 
-/** Per-model entry in `m3-clean-overrides.json`. Only `contextWindow` is
- *  honored — full model replacement (cost, compat, etc.) is what
- *  `~/.pi/agent/models.json` is for. */
-interface ModelOverride {
-	contextWindow?: number;
-}
-
-type OverridesFile = Record<string, Record<string, ModelOverride>>;
-
-/**
- * Packages known to expose `getAgentDir()`. The first one whose import
- * succeeds wins. Add new Pi forks here. If none is installed, we silently
- * skip the override file and use built-in defaults.
- */
-const AGENT_DIR_PROVIDERS = [
-	"@earendil-works/pi-coding-agent", // vanilla pi
-	"@oh-my-pi/pi-coding-agent", // omp (can1357/oh-my-pi)
-	"@gsd/pi-coding-agent", // gsd (open-gsd/gsd-pi)
-] as const;
-
-async function resolveAgentDir(): Promise<string | undefined> {
-	for (const pkg of AGENT_DIR_PROVIDERS) {
-		try {
-			const mod = await import(pkg);
-			if (typeof mod.getAgentDir === "function") return mod.getAgentDir();
-		} catch {
-			// Package not installed in this runtime — try the next one.
-		}
+/** Pure host detection. Self-contained (inlines the path-normalization
+ *  step) so the regression test can `eval` the function body in isolation
+ *  without dragging in module-level state. Cross-platform: Windows
+ *  argv[1] is `C:\…\node_modules\@opengsd\gsd-pi\dist\loader.js`, POSIX
+ *  is `/opt/homebrew/lib/node_modules/@opengsd/gsd-pi/dist/loader.js` —
+ *  both match the substring `@opengsd/gsd-pi` after normalization. */
+export function detectHost(
+	argv1: string | undefined,
+	bunVersion: string | undefined,
+): Host | undefined {
+	// omp is uniquely identified by running under Bun — nothing else in
+	// scope uses Bun, and omp's binary is Bun-compiled (MEM022).
+	if (typeof bunVersion === "string" && bunVersion.length > 0) return "omp";
+	const norm = String(argv1 ?? "").replace(/\\/g, "/").toLowerCase();
+	// Order matters: gsd's path also contains `pi-coding-agent` (the
+	// @gsd/pi-coding-agent re-export), so check the more specific gsd
+	// substring first to avoid a false positive on `pi`.
+	if (norm.includes("@opengsd/gsd-pi") || norm.includes("gsd-pi/dist/loader")) {
+		return "gsd";
+	}
+	if (
+		norm.includes("@earendil-works/pi-coding-agent") ||
+		norm.includes("pi-coding-agent/dist/cli")
+	) {
+		return "pi";
 	}
 	return undefined;
 }
 
-interface InvalidEntry {
-	provider: string;
-	modelId: string;
-	field: string;
-	reason: string;
+/** Expand a leading `~` or `~/` to the user's home directory. Mirrors the
+ *  POSIX-shell convention most users will reach for; we do not support
+ *  `~user/` syntax because that requires `/etc/passwd` lookup and is not
+ *  portable to Windows. */
+function expandHome(p: string): string {
+	if (p === "~") return homedir();
+	if (p.startsWith("~/") || p.startsWith("~\\")) return homedir() + p.slice(1);
+	return p;
 }
 
-interface LoadedOverrides {
-	contextWindow: number;
-	invalid: InvalidEntry[];
-}
-
-/** Read the override file and return the merged `contextWindow` plus a list
- *  of validation errors to surface via TUI at `session_start`. */
-async function loadOverrides(agentDir: string): Promise<LoadedOverrides> {
-	const result: LoadedOverrides = {
-		contextWindow: M3_DEFAULTS.contextWindow,
-		invalid: [],
-	};
-	let parsed: OverridesFile;
+/** Try one package specifier; return its `getAgentDir()` if it imports
+ *  cleanly and exposes the function, else `undefined`. */
+async function tryPackage(pkg: string): Promise<string | undefined> {
 	try {
-		const text = await readFile(join(agentDir, OVERRIDES_FILE), "utf8");
-		parsed = JSON.parse(text);
+		const mod = await import(pkg);
+		if (typeof mod.getAgentDir === "function") return mod.getAgentDir();
 	} catch {
-		// File missing, unreadable, or invalid JSON — silent fallback to defaults.
-		return result;
+		// Package not installed in this runtime — try the next one.
 	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		return result;
+	return undefined;
+}
+
+/** Order in which to probe `getAgentDir()` packages for a given host.
+ *  The matching host's package is tried first (it should be the source of
+ *  truth on a single-host install); vanilla pi is always second because
+ *  the legacy-pi-compat rewrite (MEM013) means `@earendil-works/pi-coding-agent`
+ *  is the resolved module under omp on most setups; the remaining host is
+ *  the last resort. Exported for the regression test; takes the providers
+ *  map as an argument (defaulting to the module constant) so the test can
+ *  inject a fixture without module-scope gymnastics. */
+export function probeOrder(
+	host: Host | undefined,
+	providers: typeof AGENT_DIR_PROVIDERS = AGENT_DIR_PROVIDERS,
+): readonly string[] {
+	if (host === "pi") {
+		return [providers.pi, providers.omp, providers.gsd];
 	}
-	// Both providers share the same model id and the same context-window
-	// limit (M3 is one model). We honor only the first valid value across
-	// the file; mixing different `contextWindow` per provider would be
-	// surprising. If the user really needs split, they can override per
-	// provider in their own `models.json` (full model replacement).
-	let chosen: number | undefined;
-	for (const [provider, models] of Object.entries(parsed)) {
-		if (!models || typeof models !== "object") continue;
-		for (const [modelId, override] of Object.entries(models)) {
-			if (!override || typeof override !== "object") continue;
-			if (override.contextWindow === undefined) continue;
-			if (
-				typeof override.contextWindow !== "number" ||
-				!Number.isFinite(override.contextWindow) ||
-				override.contextWindow <= 0
-			) {
-				result.invalid.push({
-					provider,
-					modelId,
-					field: "contextWindow",
-					reason: `expected positive number, got ${JSON.stringify(override.contextWindow)}`,
-				});
-				continue;
+	if (host === "gsd") {
+		return [providers.gsd, providers.pi, providers.omp];
+	}
+	if (host === "omp") {
+		return [providers.omp, providers.pi, providers.gsd];
+	}
+	// No host detected — fall through to the legacy order (vanilla first,
+	// then the others). Single-host installs still work.
+	return [providers.pi, providers.omp, providers.gsd];
+}
+
+async function resolveAgentDir(): Promise<string | undefined> {
+	// Priority 1: explicit user/test override. Validated for existence so
+	// a stale value pointing at a deleted dir falls through to detection
+	// rather than silently masking override-file loading.
+	const override = process.env.M3_CLEAN_AGENT_DIR;
+	if (override && override.length > 0) {
+		const expanded = expandHome(override);
+		try {
+			const st = await stat(expanded);
+			if (st.isDirectory()) {
+				debugAgentDir("override", expanded);
+				return expanded;
 			}
-			if (chosen === undefined) chosen = override.contextWindow;
+		} catch {
+			// Override dir missing or unreadable — log and fall through.
+			console.debug(
+				`[m3-clean] M3_CLEAN_AGENT_DIR=${override} is not a readable directory; falling through to host detection`,
+			);
 		}
 	}
-	if (chosen !== undefined) result.contextWindow = chosen;
-	return result;
+
+	// Priority 2: host detection (bun runtime fingerprint + argv[1] substring).
+	const host = detectHost(process.argv[1], process.versions.bun);
+
+	// Priority 3: per-host package probe, matching package first.
+	for (const pkg of probeOrder(host)) {
+		const dir = await tryPackage(pkg);
+		if (dir) {
+			debugAgentDir(host ?? "unknown", dir);
+			return dir;
+		}
+	}
+	debugAgentDir(host ?? "unknown", undefined);
+	return undefined;
 }
 
-interface ProviderSpec {
-	name: string;
-	baseUrl: string;
-	apiKey: string;
-	label: string;
+/** One-line diagnostic of the resolved agent dir. `console.debug` is the
+ *  right tier: silent under default Node/Bun, visible if the user
+ *  redirects stderr (`node ... 2>debug.log` or `DEBUG=*`). */
+function debugAgentDir(host: string | "unknown", agentDir: string | undefined): void {
+	console.debug(`[m3-clean] host=${host} agentDir=${agentDir ?? "<undefined>"}`);
 }
-
-const PROVIDERS: readonly ProviderSpec[] = [
-	{
-		name: "minimax-m3-clean",
-		baseUrl: "https://api.minimax.io/v1",
-		apiKey: "$MINIMAX_API_KEY",
-		label: "MiniMax-M3 (clean)",
-	},
-	{
-		name: "minimax-cn-m3-clean",
-		baseUrl: "https://api.minimaxi.com/v1",
-		apiKey: "$MINIMAX_CN_API_KEY",
-		label: "MiniMax-M3 (clean — CN)",
-	},
-];
 
 function makeProvider(
 	pi: ExtensionAPI,
 	spec: ProviderSpec,
 	contextWindow: number,
-) {
+	streamSimpleFn: typeof streamSimple,
+	warnings: string[],
+): boolean {
 	const api = spec.name as Api; // custom api id so only these models hit our handler
-	pi.registerProvider(spec.name, {
-		baseUrl: spec.baseUrl,
-		apiKey: spec.apiKey,
-		api,
-		streamSimple: (
-			model: Model<Api>,
-			context: Context,
-			options?: SimpleStreamOptions,
-		) => {
-			const driver = getApiProvider("openai-completions");
-			if (!driver)
-				throw new Error("openai-completions api provider not registered");
-			const base = driver.streamSimple(
-				{ ...model, api: "openai-completions" },
-				context,
-				options,
-			);
-			return cleanStream(base);
-		},
-		models: [
-			{
+	try {
+		pi.registerProvider(spec.name, {
+			baseUrl: spec.baseUrl,
+			apiKey: spec.apiKey,
+			api,
+			streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
+				const base = streamSimpleFn({ ...model, api: "openai-completions", compat: M3_COMPAT }, context, options);
+				return cleanStream(base);
+			},
+			models: [{
 				id: "MiniMax-M3",
 				name: spec.label,
 				reasoning: true,
@@ -607,9 +228,19 @@ function makeProvider(
 				contextWindow,
 				maxTokens: M3_DEFAULTS.maxTokens,
 				compat: M3_COMPAT,
-			},
-		],
-	});
+			}],
+		});
+		return true;
+	} catch (err) {
+		// registerProvider throws on validation error (e.g. duplicate name
+		// when the host's built-in provider collides with our spec). Surface
+		// via the deferred session_start notification and skip this provider.
+		const reason = err instanceof Error ? err.message : String(err);
+		warnings.push(
+			`m3-clean: failed to register provider "${spec.name}" — ${reason}. Skipping.`,
+		);
+		return false;
+	}
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -618,23 +249,31 @@ export default async function (pi: ExtensionAPI) {
 		? await loadOverrides(agentDir)
 		: { contextWindow: M3_DEFAULTS.contextWindow, invalid: [] };
 
-	for (const spec of PROVIDERS) makeProvider(pi, spec, overrides.contextWindow);
+	// Always run the registration loop. `streamSimple` is a top-level
+	// export on all three supported hosts; the openai-completions driver
+	// is reached by passing `{...model, api: "openai-completions"}` to it.
+	// If a host's `streamSimple` cannot handle that api, the call itself
+	// errors — that's the right surface, not a load-time warning.
+	const warnings: string[] = [];
+	for (const spec of PROVIDERS) {
+		makeProvider(pi, spec, overrides.contextWindow, streamSimple, warnings);
+	}
 
-	// Surface validation errors via TUI. A missing file is silent — only
-	// malformed entries get notified. `ctx` is not available in the factory,
-	// so defer to `session_start`.
-	if (overrides.invalid.length > 0) {
-		const invalid = overrides.invalid;
-		pi.on("session_start", ((
-			_event: unknown,
-			ctx: { ui: { notify: (msg: string, kind: string) => void } },
-		) => {
-			for (const err of invalid) {
-				ctx.ui.notify(
-					`m3-clean-overrides: ${err.provider}/${err.modelId}.${err.field} — ${err.reason}. Falling back to default.`,
-					"error",
-				);
-			}
-		}) as Parameters<typeof pi.on>[1]);
+	// Surface every deferred warning at session_start. Two producers feed
+	// this same handler: the override-file validation errors from S01
+	// (`overrides.invalid`) and the fail-soft warnings from S02 (driver
+	// missing, registerProvider thrown). They are merged into one
+	// session_start handler so the user sees one grouped banner instead
+	// of several competing toasts.
+	const allWarnings: string[] = warnings.slice();
+	for (const err of overrides.invalid) {
+		allWarnings.push(
+			`m3-clean-overrides: ${err.provider}/${err.modelId}.${err.field} — ${err.reason}. Falling back to default.`,
+		);
+	}
+	if (allWarnings.length > 0) {
+		pi.on("session_start", (_event, ctx) => {
+			for (const msg of allWarnings) ctx.ui.notify(msg, "warning");
+		});
 	}
 }
