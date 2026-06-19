@@ -79,6 +79,24 @@ with open('PATH/TO/SESSION.jsonl') as f:
 
 Healthy numbers: turn 1 `input ~ 9000, cacheRead ~ 100`. Turn 2+ `input ~ 100, cacheRead ~ 9000+`.
 
+### Install cycle verification
+
+The S07 slice added three per-host install-cycle shell scripts that automate the manual `pi install -l ./` → turn → session-log → `pi remove -l ./` flow documented above. They assert the session log file lands at the host-correct path (`~/.pi/agent/sessions/`, `~/.gsd/agent/sessions/`, or `~/.omp/agent/sessions/`), covering the macOS `/tmp` → `/private/tmp` symlink precedent.
+
+| Host        | Script                                              |
+| ----------- | --------------------------------------------------- |
+| vanilla pi  | `.gsd/milestones/M001/slices/S07/tasks/T01-pi-install-cycle.sh` |
+| omp         | `.gsd/milestones/M001/slices/S07/tasks/T01-omp-install-cycle.sh` |
+| gsd         | `.gsd/milestones/M001/slices/S07/tasks/T01-gsd-install-cycle.sh` |
+
+Run an individual script directly (`bash T01-pi-install-cycle.sh`) for ad-hoc UAT, or run the regression check to verify all three scripts are present and syntactically valid:
+
+```bash
+node tests/s07-install-cycle-check.mjs
+```
+
+The regression check is hermetic (Node 18+ stdlib only, MEM020 pattern) and exits 0 only when all three scripts exist, pass `bash -n`, and AGENTS.md still references them by filename — protecting against accidental script removal.
+
 ## Multi-host support
 
 The extension targets three pi-family hosts. Each one discovers the
