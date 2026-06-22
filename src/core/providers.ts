@@ -17,6 +17,24 @@
  * in S04 T04 evidence record 150700a3). Vanilla `@earendil-works/pi-ai@0.79.1`
  * ignores the field, so this is a safe additive change for vanilla pi users.
  *
+ * S01/M003 addition: each entry now carries an `oauth` block.
+ * `oauth.login` is a closure over `callbacks.onPrompt` (NOT `ctx.ui`) so the
+ * prompt dialog is host-rendered at `/login` time. On omp, returning a
+ * string from `login` is persisted as `api_key`; on pi/gsd, users continue
+ * to use the host's native `/login` API-key picker (our oauth entry exists
+ * for omp and is harmlessly ignored by pi/gsd).
+ *
+ * Runtime contract risk (vanilla pi): `registerProvider`'s `oauth` shape in
+ * `@earendil-works/pi-coding-agent` is typed as
+ * `Omit<OAuthProviderInterface, "id">`, which requires `login`,
+ * `refreshToken`, and `getApiKey`. Our local `OauthConfig` only declares
+ * `name + login`, so on vanilla pi 0.79.1 `pi.registerProvider(name, {
+ * oauth })` will reject the shape at validation time. The S02 fail-soft
+ * machinery catches that throw and defers a `session_start` warning
+ * naming the provider — no crash, just a no-op registration on pi/gsd.
+ * omp's `OAuthProvider` accepts the narrow `{name, login}` shape (verified
+ * by S02 UAT).
+ *
  * The constants here are unchanged from the previous `index.ts` definition
  * (verbatim move). `import type Api` is added in anticipation of T02/T03
  * work that will move `makeProvider` (which uses `Api` and `Model<Api>`)
@@ -25,6 +43,8 @@
  */
 
 import type { Api } from "@earendil-works/pi-ai";
+import { oauthConfigFor } from "./oauth-login";
+import type { OauthConfig } from "./oauth-login";
 
 /** Driver compatibility flags for MiniMax-M3 on the OpenAI-compatible
  *  endpoint. `supportsStore: false` is what enables the extension's whole
@@ -55,9 +75,20 @@ export interface ProviderSpec {
 	baseUrl: string;
 	apiKey: string;
 	label: string;
+	/** Cross-host login descriptor. Required (not optional) so a future
+	 *  `PROVIDERS` entry cannot accidentally ship without one. See the
+	 *  file header for the per-host contract. */
+	oauth: OauthConfig;
 }
 
-export const PROVIDERS: readonly ProviderSpec[] = [
+interface ProviderSpecSeed {
+	name: string;
+	baseUrl: string;
+	apiKey: string;
+	label: string;
+}
+
+const PROVIDER_SEEDS: readonly ProviderSpecSeed[] = [
 	{
 		name: "minimax-m3-clean",
 		baseUrl: "https://api.minimax.io/v1",
@@ -71,3 +102,13 @@ export const PROVIDERS: readonly ProviderSpec[] = [
 		label: "MiniMax-M3 (clean — CN)",
 	},
 ];
+
+/** Final, immutable provider list with `oauth` blocks attached. The
+ *  `.map(s => ({ ...s, oauth: oauthConfigFor(s) }))` pattern lets us keep
+ *  the seeds readable as plain object literals (no self-reference TS
+ *  narrowing issues) while still producing entries that satisfy the
+ *  `ProviderSpec` interface. */
+export const PROVIDERS: readonly ProviderSpec[] = PROVIDER_SEEDS.map((s) => ({
+	...s,
+	oauth: oauthConfigFor(s),
+}));

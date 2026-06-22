@@ -170,10 +170,10 @@ if (existsSync(ompPath)) {
 	} else {
 		fail("T01-omp-install-cycle.sh does not use omp-correct install CLI (MEM027 bug 3)");
 	}
-	if (ompSrc.includes("plugin remove")) {
-		pass("T01-omp-install-cycle.sh uses `omp plugin remove` (MEM027 bug 3)");
+	if (ompSrc.includes("plugin uninstall") || ompSrc.includes("plugin remove")) {
+		pass("T01-omp-install-cycle.sh uses `omp plugin uninstall|remove` (MEM027 bug 3 fixed)");
 	} else {
-		fail("T01-omp-install-cycle.sh does not use omp plugin remove (MEM027 bug 3)");
+		fail("T01-omp-install-cycle.sh does not use omp-correct uninstall CLI (MEM027 bug 3)");
 	}
 	// omp-specific: --session-id is rejected by omp's CLI (per MEM027)
 	// and --provider is the legacy flag. We assert the omp script uses

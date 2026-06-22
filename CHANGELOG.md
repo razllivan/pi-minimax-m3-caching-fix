@@ -39,6 +39,65 @@ with multi-host support and tunable context windows:
   lock the canonical provider name, the omp CLI form, the Windows
   cwd-prefix glob, and the omp slash-form turn command.
 
+## [Unreleased]
+
+### Fixed
+
+- **omp `/login` auth-broker contract gap (D-001 / MEM035).** Added a
+  host-branched direct call to `registerOAuthProvider` from
+  `@oh-my-pi/pi-ai/oauth` (loaded via dynamic `import()` inside an
+  `if (host === "omp")` branch, per MEM037) so omp's auth-broker
+  registry receives the OAuth descriptor for `minimax-m3-clean` and
+  `minimax-cn-m3-clean` even when the upstream
+  `validateProviderConfiguration` rejects the registration shape and
+  the `pi.registerProvider({oauth})` path is short-circuited. The
+  host branch is gated on `detectHost()` from `index.ts` (the same
+  chain that `resolveAgentDir()` uses per MEM018), so vanilla pi and
+  gsd paths are unchanged — the dynamic import lives entirely inside
+  the omp branch and the other two hosts never load
+  `@oh-my-pi/pi-ai/oauth`. `M3_COMPAT.streamIdleTimeoutMs: 30_000`
+  (MEM017) is preserved. The cross-host regression orchestrator
+  (`tests/uat/cross-host-regression.sh`) now treats the prior
+  `EXPECTED_GAP` for D-001 and the install-cycle session-log-absent
+  signature as hard failures, so a developer machine without
+  `M3_UAT_KEY` reports **10 PASS, 0 EXPECTED_GAP, 0 FAIL** (up from
+  the previous 9 PASS + 1 EXPECTED_GAP). Two structural regression
+  checks are extended to lock the new path:
+  `tests/s01-auth-surface.mjs` now has **21 assertions** (was 18)
+  including the dual-registration markers, and
+  `tests/s02-uat-omp-login-check.mjs` has **18 assertions** (was 16)
+  including the `registerOAuthProvider` and host-branch markers.
+  `bash tests/uat/omp-auth-login.sh` now exits 0 on omp 16.0.2 with
+  no key required for the registration-shape proof. See
+  `.gsd/milestones/M003/slices/S03/S03-SUMMARY.md` for the canonical
+  walkthrough and `AGENTS.md` "omp `/login` auth surface for custom
+  providers" for the host-branched dispatch contract.
+
+### Added
+
+- **omp `/login` auth surface for custom providers.** The extension's
+  `registerProvider` call now includes an `oauth` block
+  (`{ name, login, refreshToken, getApiKey }`) on every host so omp
+  16.0.2 surfaces `minimax-m3-clean` and `minimax-cn-m3-clean` in its
+  native `/login` provider picker. omp is the only host that reads
+  this block — vanilla pi (`@earendil-works/pi-coding-agent@0.79.1`)
+  and gsd-pi present their own built-in API-key dialog when you pick
+  a provider from `/model`, and that dialog is what you'll use on
+  those hosts. The same `oauth` block is registered on every host for
+  shape uniformity; on pi/gsd it is a no-op. Users on omp can now
+  persist their key once via `/login` → pick provider → paste key,
+  and every subsequent `omp` turn uses the saved credential without
+  needing `MINIMAX_API_KEY` exported in the shell. The env-var path
+  (`export MINIMAX_API_KEY=...`) is retained as the primary path for
+  scripted use on every host (CI, cron, Docker, systemd). See
+  `README.md` "Saving your API key" and `AGENTS.md` "omp `/login`
+  auth surface for custom providers" for the full walkthrough and
+  the cross-host contract. A new runtime UAT
+  (`tests/uat/omp-auth-login.sh`) drives `omp auth-broker login
+  minimax-m3-clean` end-to-end and a 16-check hermetic regression
+  (`tests/s02-uat-omp-login-check.mjs`) locks the structural
+  invariants of that script.
+
 ## [0.2.2] - 2026-06-19
 
 Patch release — documentation and metadata only. No source changes;

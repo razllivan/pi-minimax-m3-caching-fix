@@ -73,8 +73,9 @@ provider — no new credentials required:
 ## Quickstart (for the impatient)
 
 ```bash
-# 1. Make sure your MiniMax API key is exported
-export MINIMAX_API_KEY="sk-..."
+# 1. Provide your key — see "Saving your API key" below for pi / gsd / omp
+#    (the env-var `export MINIMAX_API_KEY=...` works on every host and is
+#     the primary path for scripted use: CI, cron, Docker, systemd, etc.)
 
 # 2. Install the extension
 pi install npm:@razllivan/pi-minimax-m3-caching-fix
@@ -94,6 +95,66 @@ pi
 That's it. No new credentials, no config file, no restart of the upstream
 `minimax` provider. Just pick the right model in `/model` and the rest
 happens automatically.
+
+## Saving your API key
+
+The extension reuses the env vars you already have for the built-in
+`minimax` provider — no new credentials required. How you provide them
+depends on which Pi-family host you run:
+
+| Host          | Primary path                                                                     | Env-var fallback                                                                                  |
+| ------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| vanilla pi    | The host's native API-key picker (run `pi`, pick the provider, paste your key).  | `export MINIMAX_API_KEY="sk-..."` (or set it in your shell rc / process env).                     |
+| gsd-pi        | Same — the host's native API-key picker.                                         | `export MINIMAX_API_KEY="sk-..."`.                                                                |
+| omp           | `/login` → pick `minimax-m3-clean` → paste your key (see walkthrough below).     | `export MINIMAX_API_KEY="sk-..."` (env-var fallback, retained for scripted use — same as pi/gsd).  |
+
+The same matrix applies to `minimax-cn-m3-clean` and `MINIMAX_CN_API_KEY`
+on all three hosts.
+
+The **env-var path is primary for scripted use** (CI, cron, Docker
+containers, systemd units, etc.) on every host — set it once in your
+shell rc or process env and the extension reads it via
+`apiKey: "$MINIMAX_API_KEY"` (the leading-`$` form is interpolated at
+request time). The interactive pickers are the primary path for one-off
+or per-session use.
+
+The picker UX differs per host because each Pi fork ships its own auth
+dialog. omp is the only host that reads the extension's `oauth` block
+from `registerProvider` and surfaces our providers in its native
+`/login` selector — vanilla pi and gsd-pi present their own built-in
+API-key dialog when you pick a provider from `/model`, and that dialog
+is what you'll use on those hosts. The same `oauth` block is registered
+on every host for shape uniformity; on pi/gsd it is a no-op.
+
+### Saving your API key on omp
+
+omp ships a `/login` UX that lists every registered provider. Our two
+providers appear there because the extension's `registerProvider` call
+includes an `oauth` block (see `AGENTS.md` "omp `/login` auth surface
+for custom providers" for the technical contract — `oauth: { name,
+login, refreshToken, getApiKey }`).
+
+To save your key on omp:
+
+1. Run `omp`.
+2. Type `/login` and press Enter.
+3. Pick **`minimax-m3-clean`** (or **`minimax-cn-m3-clean`** for the
+   China endpoint) from the provider list. Both are listed as long as
+   the corresponding env var is set OR you have not yet saved a key —
+   see the per-provider note below.
+4. omp prompts you to paste your key. Paste it; input is hidden.
+5. omp persists the key in its auth-broker store (`~/.omp/agent/agent.db`).
+   You can run `omp auth-broker list` to confirm.
+
+After this, every subsequent `omp` turn uses the saved key. The
+extension's `oauth.login` callback runs AT LOGIN TIME (not at extension
+load), so the picker works the same whether you ran `/login` before or
+after starting `omp`.
+
+**Per-provider note.** omp only shows a provider in `/login` once its
+auth is "available" to the auth-broker registry. If
+`minimax-cn-m3-clean` is missing from the list, set
+`MINIMAX_CN_API_KEY` (even to a dummy value) and re-run `/login`.
 
 ## Use
 

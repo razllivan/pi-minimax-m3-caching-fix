@@ -97,6 +97,34 @@ node tests/s07-install-cycle-check.mjs
 
 The regression check is hermetic (Node 18+ stdlib only, MEM020 pattern) and exits 0 only when all three scripts exist, pass `bash -n`, and AGENTS.md still references them by filename — protecting against accidental script removal.
 
+### omp `/login` auth-login runtime UAT (M003 S02)
+
+The S02 slice added a runtime UAT script under `tests/uat/` that proves the S01 oauth registration reaches omp's `/login` UX end-to-end. Where the S07 install-cycle scripts above prove the *install + session-log surface* (passing `--api-key` explicitly), this script proves the *saved-credential path* — the one `/login` enables — by driving `omp auth-broker login minimax-m3-clean` and asserting the saved key reaches omp's openai-completions driver without `--api-key` on the turn command.
+
+| Artifact | Path | Purpose |
+| --- | --- | --- |
+| Runtime UAT script | `tests/uat/omp-auth-login.sh` | Snapshot `~/.omp/agent/agent.db` → install → drive `omp auth-broker login` via piped stdin → assert `omp auth-broker list --json` enumerates `minimax-m3-clean` → optionally run end-to-end turn with `MINIMAX_API_KEY` UNSET, NO `--api-key` → grep session log for `cacheRead > 0` → uninstall + restore snapshot. |
+| Hermetic regression check | `tests/s02-uat-omp-login-check.mjs` | MEM020-pattern structural test: script exists, `bash -n` passes, contains load-bearing markers (`trap restore EXIT`, `auth-broker login`, `auth-broker list --json`, `m3-s02-uat`, `cacheRead`, `minimax-m3-clean`, `MiniMax-M3`, `M3_UAT_KEY`), turn command does NOT pass `--api-key` (MEM028 guard), AGENTS.md references the script by filename. |
+| Two-tier UAT (R1 mitigation) | `M3_UAT_KEY` env var | End-to-end turn requires a real upstream key (cacheRead > 0 only appears after a successful upstream request). The script always runs steps 1–3 (registration + list enumeration); step 4 (end-to-end turn) only runs when `M3_UAT_KEY` is set, otherwise it prints `SKIP` and exits 0. CI keeps the registration-shape proof; maintainers provision a real key for the full runtime proof. |
+
+Run the script directly for ad-hoc UAT:
+
+```bash
+# Hermetic registration-shape proof (no real key required):
+bash tests/uat/omp-auth-login.sh
+
+# Full end-to-end proof (requires a real upstream MiniMax key):
+M3_UAT_KEY=<real-key> bash tests/uat/omp-auth-login.sh
+```
+
+Or run the structural regression check:
+
+```bash
+node tests/s02-uat-omp-login-check.mjs
+```
+
+The hermetic check exits 0 only when all assertions pass. Per R1 (S02 research), `omp auth-broker login minimax-m3-clean` and `omp auth-broker list --json` empirically surface a structural contract gap on omp 16.0.2: `pi.registerProvider({oauth})` registers with the model registry but does NOT route to omp's auth-broker registry. The script reports this gap loudly (FAIL with diagnostic) rather than silently passing — the runtime UAT's purpose is to be the falsifier, not the contract enforcer. The fix path is documented in `.gsd/milestones/M003/slices/S02/S02-RESEARCH.md` (F1–F4) and the D-001 decision.
+
 ## Multi-host support
 
 The extension targets three pi-family hosts. Each one discovers the
@@ -240,6 +268,128 @@ deferred to `session_start` — no exception propagates out of the
 extension factory. Warnings are deferred to `session_start` because
 `ctx.ui.notify` is not available in the extension factory — the
 same precedent the override-file validation errors use.
+
+### omp `/login` auth surface for custom providers (M003 S01)
+
+The registration shape that surfaces our providers in omp's `/login`
+selector is a single `oauth` field on the `pi.registerProvider` config
+object:
+
+```ts
+pi.registerProvider(spec.name, {
+  baseUrl: spec.baseUrl,
+  apiKey: spec.apiKey,   // e.g. "$MINIMAX_API_KEY"
+  oauth: spec.oauth,     // { name, login, refreshToken, getApiKey }
+  api,
+  streamSimple: ...,
+  models: [...],
+});
+```
+
+The cross-host contract for that `oauth` block is documented
+asymmetry, not a uniform behavior:
+
+- **omp 16.0.2.** `registerProvider` reads `config.oauth` and dispatches
+  to `registerOAuthProvider({...config.oauth, id: providerName, sourceId})`.
+  Our provider entry then appears in omp's `/login` selector. When the
+  user picks it, omp's `AuthStorage.login()` invokes our
+  `login({onPrompt, ...})` callback AT LOGIN TIME and persists the
+  returned string (recovered via `getApiKey(credentials)`) as the
+  `api_key` for that provider. omp's `OAuthProviderInterface.login`
+  types the return as `Promise<OAuthCredentials | string>`; both hosts
+  funnel through `getApiKey` for the persisted key string, so the
+  `OAuthCredentials` shape (`{access, refresh, expires}`) we return is
+  the union-typed value.
+- **vanilla pi 0.79.1 / gsd-pi.** `registerProvider` accepts the same
+  `oauth` shape at the type level (their `ProviderConfig.oauth` is
+  `Omit<OAuthProviderInterface, "id">`), but expose their own native
+  `/login` API-key picker. **Users on those hosts will not click our
+  oauth entry** — they pick the provider from the host's native list
+  and paste the key into the host's own dialog. Our `oauth` block is a
+  no-op there; the S02 fail-soft `try/catch` around `registerProvider`
+  is the safety net for the case where the host validates the shape
+  strictly and throws on `login`/`refreshToken`/`getApiKey`.
+
+#### omp safety-net dispatch via `registerOAuthProvider` (M003 S03)
+
+The `pi.registerProvider({oauth})` call does dispatch to omp's
+`registerOAuthProvider` internally (verified in omp 16.0.2's
+`cli.js`), but the dispatch only fires when
+`validateProviderConfiguration` accepts the registration shape and
+the surrounding `try/catch` in `makeProvider()` does not short-circuit
+the call. On a developer machine where the validation rejects the
+shape (e.g. a stricter `M3_COMPAT` check under omp 16.0.2), the
+provider is skipped before `registerOAuthProvider` is ever reached
+and `omp auth-broker list --json` returns the provider as MISSING
+(D-001 / MEM035 — the empirical gap S02 surfaced).
+
+S03 closes this with a host-branched safety-net dispatch in
+`index.ts::registerOmpOAuth`. The helper is `await`ed from
+`makeProvider` BEFORE the existing `pi.registerProvider` call and
+runs only when `detectHost() === "omp"` (the same chain that
+`resolveAgentDir()` uses per MEM018). It dynamically
+`import("@oh-my-pi/pi-ai/oauth")` for `registerOAuthProvider` and
+calls it with `{ ...spec.oauth, id: spec.name, sourceId }`. The
+dynamic import lives entirely inside the `if (host === "omp")` branch
+per MEM037, so vanilla pi and gsd never attempt to load
+`@oh-my-pi/pi-ai/oauth` (the module is not published for those
+hosts and a static import would crash extension load). Vanilla pi
+and gsd paths are otherwise unchanged — the host-branched dispatch
+is additive: the existing `pi.registerProvider` call still runs on
+every host for the model registration, and on omp it provides
+belt-and-suspenders coverage for the OAuth descriptor even when the
+model-registration path is rejected by `validateProviderConfiguration`.
+Full root-cause analysis and the verified facts behind the fix live
+in `.gsd/milestones/M003/slices/S03/S03-RESEARCH.md`; the static
+analysis of omp 16.0.2's `cli.js` line 2438 (the dispatch) and line
+676 (the `registerOAuthProvider` function itself) is the empirical
+proof that the dispatch exists and that the gap is upstream of it.
+
+#### The `onPrompt`-not-`ctx.ui` rule
+
+The `oauth.login` callback is invoked by the host's `AuthStorage`
+**at login time** — long after the extension factory has returned. The
+factory's `ctx.ui` is `undefined` by then, so the callback MUST close
+over the host-injected `callbacks.onPrompt` channel, not over
+`ctx.ui` captured during factory execution. The implementation lives
+in `src/core/oauth-login.ts::oauthConfigFor`, where the `login`
+function destructures `callbacks.onPrompt` and calls it with a
+`{message: "Paste your $ENV_VAR_NAME for <model label>. Input is hidden."}`
+prompt. The prompt message references both the env-var name AND the
+model label so the user can verify they are pasting the right key into
+the right provider's dialog (the
+"Prompt labels leaking the env-var name vs the model label" pitfall
+documented in the M003 research). This is the largest remaining pain
+point in custom-provider auth (MEM027) — every host ships its own
+slightly different `OAuthLoginCallbacks` shape, and we deliberately
+declare the narrow structural subset we need (`OauthPromptCallbacks`)
+locally rather than import any host's `OAuthLoginCallbacks` type.
+
+The env-var fallback (`export MINIMAX_API_KEY=…`) is **retained** for
+users who already have it. It remains the primary path on pi/gsd
+(where the host's native API-key picker is what they use anyway),
+and the `$MINIMAX_API_KEY` syntax in `apiKey: "$MINIMAX_API_KEY"` is
+interpolated at request time by `migrateLegacyRegisterProviderConfigValue`.
+On omp, the env-var path also works as a fallback if the user prefers
+to skip the `/login` dialog.
+
+#### Regression check
+
+`tests/s01-auth-surface.mjs` (hermetic, Node 18+ stdlib only, MEM020
+pattern) pins this contract: it re-implements `oauthConfigFor` in
+plain JS, cross-checks the body string against a literal regex
+extracted from the source (s06's "refactor one without the other
+fails" pattern), asserts the prompt message references both the
+env-var name and the model label, asserts empty input is rejected
+so omp does not persist an empty credential, and re-asserts
+`M3_COMPAT.streamIdleTimeoutMs: 30_000` (the MEM017 regression guard
+that S05 added and S01 must not undo). After S03 the check has
+**21 assertions** (was 18): the three new ones lock in the
+host-branched dual-registration path — the `registerOmpOAuth`
+helper name, the `host === "omp"` branch guard, and the dynamic
+`import("@oh-my-pi/pi-ai/oauth")` from inside the omp branch — so
+refactoring the helper without the dynamic import, or hoisting the
+dynamic import out of the branch, fails the regression.
 
 ## Critical learnings
 

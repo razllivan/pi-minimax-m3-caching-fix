@@ -49,3 +49,6 @@ vendor/
 coverage/
 .cache/
 tmp/
+
+# ── GSD baseline (auto-generated) ──
+.gsd-worktrees/
