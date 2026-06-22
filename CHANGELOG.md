@@ -41,6 +41,14 @@ with multi-host support and tunable context windows:
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-22
+
+Adds the omp `/login` auth surface for custom providers and the
+companion host-branched `registerOAuthProvider` safety-net dispatch.
+Source-level additive change — the registered providers, the
+in-flight thinking-cleanup wrapper, and all 0.2.x behavior are
+preserved. Existing consumers on vanilla pi and gsd-pi are unaffected.
+
 ### Fixed
 
 - **omp `/login` auth-broker contract gap (D-001 / MEM035).** Added a

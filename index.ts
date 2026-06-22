@@ -107,7 +107,7 @@
  * is also wrapped in try/catch for the same reason. The `sourceId`
  * field is read from `process.env.npm_package_name` /
  * `process.env.npm_package_version` when set (publish-time), with a
- * hard-coded `"@razllivan/pi-minimax-m3-caching-fix@0.2.2"` fallback
+ * hard-coded `"@razllivan/pi-minimax-m3-caching-fix@0.2.3"` fallback
  * that matches the current `package.json` so `unregisterOAuthProviders`
  * can be invoked on reload without orphaning prior registrations.
  *
@@ -273,7 +273,7 @@ function debugAgentDir(host: string | "unknown", agentDir: string | undefined): 
  *  publish-time env-var path (preferred when set) produces the same
  *  shape; this literal is the offline / non-pnpm fallback. Keep in
  *  sync with `package.json` `name` and `version` at bump time. */
-const FALLBACK_SOURCE_ID = "@razllivan/pi-minimax-m3-caching-fix@0.2.2";
+const FALLBACK_SOURCE_ID = "@razllivan/pi-minimax-m3-caching-fix@0.2.3";
 
 /** Resolve the stable `sourceId` string for `registerOAuthProvider`.
  *  Reads `process.env.npm_package_name` and `npm_package_version` when
