@@ -391,6 +391,70 @@ helper name, the `host === "omp"` branch guard, and the dynamic
 refactoring the helper without the dynamic import, or hoisting the
 dynamic import out of the branch, fails the regression.
 
+### omp `apiKey` runtime-override shadowing (M004)
+
+The M004 regression surfaced a second asymmetric failure on omp's
+`AuthStorage.getApiKey()` priority chain, distinct from the M003
+S01/S03 `registerOAuthProvider` registration-shape gap. Users on
+omp who authenticated via `/login` (so the OAuth credential is in
+omp's auth-broker store and `process.env.MINIMAX_API_KEY` is unset)
+saw every subsequent chat fail with upstream 401 / 1004. Root cause:
+
+**omp 16.0.2 priority chain in `AuthStorage.getApiKey()`:**
+`runtimeOverrides > configOverrides > api_key credentials > oauth
+credentials > env var`. `pi.registerProvider({apiKey:
+"$MINIMAX_API_KEY"})` calls omp's `installProviderApiKey` with the
+literal string `"$MINIMAX_API_KEY"`. `installProviderApiKey`
+materializes that literal into `process.env.MINIMAX_API_KEY` if the
+env var is unset — the common post-`/login` state — and inserts it
+as a `runtimeOverride` at the TOP of the chain. omp does NOT
+interpolate the `$`-prefix the way vanilla pi's
+`migrateLegacyRegisterProviderConfigValue` does at request time;
+the literal is treated as a real string. The next chat sends
+`Authorization: Bearer $MINIMAX_API_KEY` → upstream 401/1004,
+even though a perfectly valid oauth credential is sitting three
+slots lower in the same chain. pi/gsd do not install runtime
+overrides from `registerProvider` config, so the env-var fallback
+works on those hosts. (D007)
+
+**Fix.** Host-branched guard inside `index.ts::makeProvider` that
+omits the `apiKey` key from the `pi.registerProvider` config on
+omp only. The omp branch's config object does NOT contain the
+`apiKey` key AT ALL (not even `apiKey: undefined` — that still
+installs a runtime override that resolves to `undefined`); pi/gsd
+keep the pre-fix `apiKey: spec.apiKey` shape unchanged so their
+existing env-var fallback (interpolated at request time by
+`migrateLegacyRegisterProviderConfigValue` when the env var is set)
+continues to work for users on those hosts who never use `/login`.
+See `.gsd/milestones/M004/slices/S01/S01-RESEARCH.md` for the
+upstream priority-chain analysis and D007 for the recorded
+decision.
+
+**Why we don't branch on `undefined` hosts.** The conservative
+default is to preserve `apiKey` on hosts where `detectHost()`
+returns `undefined` (the legacy branch). The reasoning: a future
+rebranded host is more likely to behave like vanilla pi (env-var
+interpolation) than like omp (runtime-override shadowing), and the
+env-var fallback is the path most users on pi/gsd rely on. Single-
+host installs are unaffected — only multi-host authors who test
+against all three forks at once can reach the `undefined` branch
+(via MEM026's `argv[1]` substring not matching any of the three
+known hosts), and on those machines the conservative default is
+the right choice.
+
+**Structural lock.** `tests/m04-omp-apikey-shadow-check.mjs`
+(hermetic, Node 18+ stdlib only, MEM020 pattern) cross-checks the
+host computation, the `if (host === "omp")` branch, the omp branch's
+omission of `apiKey:` (balanced-paren slice excludes the docblock
+comment that mentions "even `apiKey: undefined` would still install
+a runtime override"), the else branch's preservation of `apiKey:
+spec.apiKey`, the file-header docblock's references to M004 /
+`installProviderApiKey` / `AuthStorage.getApiKey` / the runtime
+override phrase, and the `FALLBACK_SOURCE_ID` version pin. A
+regression that re-acquires `apiKey: spec.apiKey` inside the omp
+branch (or removes the host-branched guard entirely) trips the
+check loudly. After this slice: 16 of 16 checks PASS.
+
 ## Critical learnings
 
 ### 1. The user's installed `pi-ai@0.79.1` does NOT have `compat.skipThinkingBlock`

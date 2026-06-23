@@ -41,6 +41,52 @@ with multi-host support and tunable context windows:
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-06-23
+
+### Fixed
+
+- **omp `/login` runtime-override shadowing (401/1004 after
+  /login).** On omp 16.0.2, `pi.registerProvider({apiKey:
+  "$MINIMAX_API_KEY"})` calls omp's `installProviderApiKey`, which
+  reads the literal string `"$MINIMAX_API_KEY"` and writes it into
+  `process.env.MINIMAX_API_KEY` if the env var is unset — the common
+  post-`/login` state, where the OAuth credential lives in omp's
+  auth-broker store. The literal lands at the TOP of
+  `AuthStorage.getApiKey()`'s priority chain (`runtimeOverrides >
+  configOverrides > api_key credentials > oauth credentials > env
+  var`), shadows the valid oauth credential sitting three slots
+  lower in the chain, and the next chat sends `Authorization: Bearer
+  $MINIMAX_API_KEY` → upstream 401 / 1004 even after a successful
+  `/login`. omp does NOT interpolate the `$`-prefix the way vanilla
+  pi's `migrateLegacyRegisterProviderConfigValue` does at request
+  time. Fix: host-branched guard inside `index.ts::makeProvider` that
+  omits the `apiKey` key from the `pi.registerProvider` config on
+  omp only (not even `apiKey: undefined` — that still installs a
+  runtime override). pi/gsd paths are unchanged — the `apiKey:
+  "$MINIMAX_API_KEY"` env-var interpolation still works on those
+  hosts via `migrateLegacyRegisterProviderConfigValue`. New
+  hermetic regression check `tests/m04-omp-apikey-shadow-check.mjs`
+  (16 assertions: 9 static source + 1 source-mirror cross-check +
+  6 behavioral) cross-checks the host computation, the `if (host
+  === "omp")` branch, the omp branch's `apiKey:` omission via
+  balanced-paren slice, the else branch's preservation of `apiKey:
+  spec.apiKey`, the file-header docblock's references to
+  `installProviderApiKey` / `AuthStorage.getApiKey` / the runtime
+  override phrase, and the `FALLBACK_SOURCE_ID` version pin. See
+  `.gsd/milestones/M004/slices/S01/S01-SUMMARY.md` for the slice
+  summary and `AGENTS.md` "omp `apiKey` runtime-override shadowing
+  (M004)" for the host-branched dispatch contract. (D007)
+
+### Changed
+
+- **v0.2.4 host-branched `apiKey` omission is additive for pi/gsd.**
+  The M004 fix only alters the config object shape on omp; the
+  pi/gsd branches continue to pass `apiKey: spec.apiKey` so users on
+  those hosts see no behavior change. The `FALLBACK_SOURCE_ID`
+  literal in `index.ts` is bumped from `…@0.2.3` to `…@0.2.4` in
+  lockstep with `package.json` so omp's `unregisterOAuthProviders`
+  cleanup continues to match across reloads.
+
 ## [0.2.3] - 2026-06-22
 
 Adds the omp `/login` auth surface for custom providers and the

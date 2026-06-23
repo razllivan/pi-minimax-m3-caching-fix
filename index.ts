@@ -107,7 +107,7 @@
  * is also wrapped in try/catch for the same reason. The `sourceId`
  * field is read from `process.env.npm_package_name` /
  * `process.env.npm_package_version` when set (publish-time), with a
- * hard-coded `"@razllivan/pi-minimax-m3-caching-fix@0.2.3"` fallback
+ * hard-coded `"@razllivan/pi-minimax-m3-caching-fix@0.2.4"` fallback
  * that matches the current `package.json` so `unregisterOAuthProviders`
  * can be invoked on reload without orphaning prior registrations.
  *
@@ -122,6 +122,33 @@
  *
  * See `.gsd/milestones/M003/slices/S03/S03-SUMMARY.md` for the slice
  * summary and verification record.
+ *
+ * Host-branched `apiKey` omission on omp (M004)
+ * ---------------------------------------------
+ * The previous shape passed `apiKey: spec.apiKey` (the literal string
+ * `"$MINIMAX_API_KEY"`) to `pi.registerProvider` on every host. On omp
+ * 16.0.2 that registered value is installed as a runtime override at
+ * the top of AuthStorage.getApiKey's priority chain
+ * (`runtimeOverrides > configOverrides > api_key credentials >
+ * oauth credentials > env var`). When `process.env.MINIMAX_API_KEY` is
+ * unset (the common case after the user authenticates via /login, since
+ * /login persists the key to the auth-broker store and not to the
+ * process env), omp writes the literal `"$MINIMAX_API_KEY"` to the env
+ * var and the next chat sends `Authorization: Bearer $MINIMAX_API_KEY`
+ * → upstream 401/1004 — even though a valid oauth credential is sitting
+ * lower in the priority chain and would have worked. (D007)
+ *
+ * The fix is host-branched: on `host === "omp"` we omit `apiKey` from
+ * the `pi.registerProvider` config entirely (the key must not appear
+ * AT ALL, not even `apiKey: undefined` — that still installs a runtime
+ * override that resolves to `undefined`). pi/gsd keep the
+ * `apiKey: spec.apiKey` shape unchanged so the existing env-var
+ * fallback (interpolated by `migrateLegacyRegisterProviderConfigValue`
+ * at request time when the env var is set) still works for users on
+ * those hosts who never use /login. See
+ * `.gsd/milestones/M004/slices/S01/S01-RESEARCH.md` for the upstream
+ * priority-chain analysis and D007 for the recorded decision. The
+ * structural lock is `tests/m04-omp-apikey-shadow-check.mjs`.
  */
 
 import { stat } from "node:fs/promises";
@@ -273,7 +300,7 @@ function debugAgentDir(host: string | "unknown", agentDir: string | undefined): 
  *  publish-time env-var path (preferred when set) produces the same
  *  shape; this literal is the offline / non-pnpm fallback. Keep in
  *  sync with `package.json` `name` and `version` at bump time. */
-const FALLBACK_SOURCE_ID = "@razllivan/pi-minimax-m3-caching-fix@0.2.3";
+const FALLBACK_SOURCE_ID = "@razllivan/pi-minimax-m3-caching-fix@0.2.4";
 
 /** Resolve the stable `sourceId` string for `registerOAuthProvider`.
  *  Reads `process.env.npm_package_name` and `npm_package_version` when
@@ -376,32 +403,72 @@ async function makeProvider(
 	warnings: string[],
 ): Promise<boolean> {
 	const api = spec.name as Api; // custom api id so only these models hit our handler
+	// Computed once for the whole provider build. `registerOmpOAuth`
+	// re-derives the host internally per MEM026; do not refactor to
+	// share — the duplicated call is intentional isolation, not drift.
+	const host = detectHost(process.argv[1], process.versions.bun);
 	// Host-branched direct registration FIRST so the oauth descriptor
 	// is in omp's `customOAuthProviders` map even if the subsequent
 	// `pi.registerProvider` call throws on a model-registry validation
 	// edge (the D-001/MEM035 root cause per S03-RESEARCH §3).
 	await registerOmpOAuth(spec, warnings);
 	try {
-		pi.registerProvider(spec.name, {
-			baseUrl: spec.baseUrl,
-			apiKey: spec.apiKey,
-			oauth: spec.oauth,
-			api,
-			streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
-				const base = streamSimpleFn({ ...model, api: "openai-completions", compat: M3_COMPAT }, context, options);
-				return cleanStream(base);
-			},
-			models: [{
-				id: "MiniMax-M3",
-				name: spec.label,
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { ...M3_DEFAULTS.cost },
-				contextWindow,
-				maxTokens: M3_DEFAULTS.maxTokens,
-				compat: M3_COMPAT,
-			}],
-		});
+		if (host === "omp") {
+			// omp branch MUST NOT install a runtime apiKey override.
+			// On omp 16.0.2, `installProviderApiKey` reads the literal
+			// `$MINIMAX_API_KEY` from the provider config and writes it
+			// to `process.env.MINIMAX_API_KEY` if the env var is unset,
+			// placing a non-functional placeholder at the top of
+			// AuthStorage.getApiKey's `runtimeOverrides > configOverrides
+			// > api_key credentials > oauth credentials > env var`
+			// priority chain. The next chat then sends
+			// `Authorization: Bearer $MINIMAX_API_KEY` → upstream 401/1004.
+			// Omitting the key entirely lets the chain fall through to
+			// the oauth credential the user saved via /login (D007).
+			// The key must NOT appear AT ALL here — even `apiKey:
+			// undefined` would still install a runtime override that
+			// resolves to `undefined`.
+			pi.registerProvider(spec.name, {
+				baseUrl: spec.baseUrl,
+				oauth: spec.oauth,
+				api,
+				streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
+					const base = streamSimpleFn({ ...model, api: "openai-completions", compat: M3_COMPAT }, context, options);
+					return cleanStream(base);
+				},
+				models: [{
+					id: "MiniMax-M3",
+					name: spec.label,
+					reasoning: true,
+					input: ["text", "image"],
+					cost: { ...M3_DEFAULTS.cost },
+					contextWindow,
+					maxTokens: M3_DEFAULTS.maxTokens,
+					compat: M3_COMPAT,
+				}],
+			});
+		} else {
+			pi.registerProvider(spec.name, {
+				baseUrl: spec.baseUrl,
+				apiKey: spec.apiKey,
+				oauth: spec.oauth,
+				api,
+				streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
+					const base = streamSimpleFn({ ...model, api: "openai-completions", compat: M3_COMPAT }, context, options);
+					return cleanStream(base);
+				},
+				models: [{
+					id: "MiniMax-M3",
+					name: spec.label,
+					reasoning: true,
+					input: ["text", "image"],
+					cost: { ...M3_DEFAULTS.cost },
+					contextWindow,
+					maxTokens: M3_DEFAULTS.maxTokens,
+					compat: M3_COMPAT,
+				}],
+			});
+		}
 		return true;
 	} catch (err) {
 		// registerProvider throws on validation error (e.g. duplicate name

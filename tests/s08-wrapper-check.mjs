@@ -42,10 +42,17 @@ const docstringHasEvidence = /\b745198ad\b/.test(indexSrc);
 
 // --- (c) CHANGELOG Unreleased Fixed section contains MEM024 or MEM025
 // AND 745198ad ---
-// We restrict the search to the Unreleased block so a future "Fixed"
-// entry under a released version that reuses the MEM ids does not
-// accidentally satisfy the assertion. The block runs from
-// `## [Unreleased]` to the next `## [` heading (or EOF).
+// We restrict the search to the Unreleased block when one exists with
+// content, so a future "Fixed" entry under a released version that
+// reuses the MEM ids does not accidentally satisfy the assertion. The
+// block runs from `## [Unreleased]` to the next `## [` heading (or
+// EOF). When `[Unreleased]` is empty (the state after a release moves
+// its content to a dated heading — see T04 of M004/S01), fall back to
+// searching across all `### Fixed` sections in CHANGELOG.md: the
+// load-bearing intent is that the MEM ids and evidence record remain
+// documented somewhere in CHANGELOG so a future refactor that loses
+// them is loud. MEM024/MEM025/745198ad are S05 historical refs and
+// landed in [0.2.1] when that release shipped the source half.
 const unreleasedStart = changelogSrc.indexOf("## [Unreleased]");
 const nextHeadingMatch = changelogSrc
 	.slice(unreleasedStart + 1)
@@ -56,17 +63,26 @@ const unreleasedEnd =
 		: changelogSrc.length;
 const unreleasedBlock =
 	unreleasedStart >= 0 ? changelogSrc.slice(unreleasedStart, unreleasedEnd) : "";
+// `### Fixed` sections inside [Unreleased] (if any).
+const unreleasedFixedSections =
+	unreleasedBlock.match(/### Fixed[\s\S]*?(?=\n### |\n## |\n*$)/g) ?? [];
+const unreleasedFixedBlock = unreleasedFixedSections.join("\n");
 
-// Within the Unreleased block, restrict to a `### Fixed` section so an
-// entry under `### Added` or `### Changed` referencing the same MEM ids
-// would not satisfy the assertion. We accept multiple `### Fixed`
-// blocks under the same release (Keep a Changelog allows it) and check
-// the union of their bodies.
-const fixedSections = unreleasedBlock.match(/### Fixed[\s\S]*?(?=\n### |\n## |\n*$)/g) ?? [];
-const fixedBlock = fixedSections.join("\n");
+// `### Fixed` sections across the entire CHANGELOG (for fallback when
+// [Unreleased] is empty post-release).
+const allFixedSections =
+	changelogSrc.match(/### Fixed[\s\S]*?(?=\n### |\n## |\n*$)/g) ?? [];
+const allFixedBlock = allFixedSections.join("\n");
 
-const changelogHasMem = /\bMEM024\b/.test(fixedBlock) || /\bMEM025\b/.test(fixedBlock);
-const changelogHasEvidence = /\b745198ad\b/.test(fixedBlock);
+const changelogUnreleasedHasContent = unreleasedBlock
+	.replace(/^## \[Unreleased\][\s\S]*?\n/, "")
+	.trim().length > 0;
+const changelogHasMem = changelogUnreleasedHasContent
+	? (/\bMEM024\b/.test(unreleasedFixedBlock) || /\bMEM025\b/.test(unreleasedFixedBlock))
+	: (/\bMEM024\b/.test(allFixedBlock) || /\bMEM025\b/.test(allFixedBlock));
+const changelogHasEvidence = changelogUnreleasedHasContent
+	? /\b745198ad\b/.test(unreleasedFixedBlock)
+	: /\b745198ad\b/.test(allFixedBlock);
 
 const checks = [
 	{
