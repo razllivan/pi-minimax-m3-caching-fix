@@ -41,6 +41,12 @@ with multi-host support and tunable context windows:
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-23
+
+### Changed
+
+- **Added host-alias keywords to `package.json`.** npm search indexes `package.json` keywords verbatim; the v0.2.4 set (`pi-package`, `minimax`, `minimax-m3`, `caching`) made the package unreachable for users searching by host name while the README headline is "Multi-host support: vanilla pi, gsd-pi, Oh my Pi (one install, three hosts)". Added: `omp` (short form matching the `omp` binary and the README/AGENTS.md prose), `gsd` (short form matching the `gsd` binary), `oh-my-pi` (long form, matches the `@oh-my-pi/*` scope and the README "Oh my Pi (omp)" mention), `gsd-pi` (long form, matches the published npm package `@opengsd/gsd-pi`). No source changes; the extension behaves identically to v0.2.4 at runtime. This release exists to refresh the npm tarball with the expanded keywords.
+
 ## [0.2.4] - 2026-06-23
 
 ### Fixed
