@@ -41,7 +41,7 @@ From a git checkout (latest, or pinned):
 
 ```bash
 pi install git:github.com/razllivan/pi-minimax-m3-caching-fix
-pi install git:github.com/razllivan/pi-minimax-m3-caching-fix@v0.2.3
+pi install git:github.com/razllivan/pi-minimax-m3-caching-fix@v0.2.4
 ```
 
 For local development from a clone:
